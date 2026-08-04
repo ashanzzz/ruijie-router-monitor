@@ -4,10 +4,10 @@ from sqlalchemy import create_engine, Column, String, Integer, DateTime, Boolean
 from sqlalchemy.orm import declarative_base, sessionmaker
 from config import settings
 
-# Ensure data dir exists
-db_dir = os.path.dirname(settings.DATABASE_URL.replace("sqlite:///", ""))
-if db_dir and not os.path.exists(db_dir):
-    os.makedirs(db_dir, exist_ok=True)
+if settings.DATABASE_URL.startswith("sqlite:///"):
+    db_dir = os.path.dirname(settings.DATABASE_URL.replace("sqlite:///", ""))
+    if db_dir and not os.path.exists(db_dir):
+        os.makedirs(db_dir, exist_ok=True)
 
 engine = create_engine(
     settings.DATABASE_URL,
