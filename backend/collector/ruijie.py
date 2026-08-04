@@ -26,7 +26,6 @@ class RuijieCollector:
         self.host = settings.RUIJIE_HOST.rstrip('/')
         self.username = settings.RUIJIE_USER
         self.password = settings.RUIJIE_PASS
-        self.mode = settings.COLLECTOR_MODE
         self.data_file = os.path.join(os.path.dirname(__file__), "ruijie_data.json")
         self.daemon_started = False
         self._daemon_process = None
@@ -104,9 +103,6 @@ class RuijieCollector:
         def _utc_iso_now() -> str:
             return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
-        if self.mode == "demo":
-            return {"snapshot_id": f"demo:{int(time.time_ns())}", "generated_at": _utc_iso_now(), "devices": self._get_demo_devices()}
-
         self._start_daemon()
         
         try:
@@ -159,8 +155,9 @@ class RuijieCollector:
                     }
         except Exception as e:
             logger.error(f"Failed to read devices: {e}")
+            raise RuntimeError("Collector unavailable") from e
 
-        return {"snapshot_id": f"demo:{int(time.time_ns())}", "generated_at": _utc_iso_now(), "devices": self._get_demo_devices()}
+        return None
 
     def _parse_ruijie_clients(self, raw_list: list) -> List[Dict[str, Any]]:
         parsed = []

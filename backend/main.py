@@ -260,16 +260,24 @@ class StarUpdateRequest(BaseModel):
 from typing import Optional, Literal
 from pydantic import Field, field_validator
 
+class DatabaseConfigRequest(BaseModel):
+    type: Literal["sqlite", "postgresql"]
+    filename: Optional[str] = Field(default="monitor.db")
+    host: Optional[str] = None
+    port: Optional[int] = None
+    name: Optional[str] = None
+    user: Optional[str] = None
+    password: Optional[str] = None
+
 class SettingsUpdateRequest(BaseModel):
     ruijie_host: str = Field(min_length=4, max_length=255)
     ruijie_user: str = Field(default="admin", max_length=128)
     ruijie_pass: Optional[str] = Field(default=None, max_length=512)
-    collector_mode: Literal["live", "demo"]
     poll_interval: int = Field(ge=3, le=300)
     telegram_bot_token: Optional[str] = Field(default=None, max_length=256)
     telegram_chat_id: str = Field(default="", max_length=128)
     telegram_enable: bool = False
-    database_url: Optional[str] = Field(default=None, max_length=2048)
+    database: DatabaseConfigRequest
 
     @field_validator("ruijie_host")
     @classmethod
@@ -279,8 +287,13 @@ class SettingsUpdateRequest(BaseModel):
             raise ValueError("必须以 http:// 或 https:// 开头")
         return value
 
-class TestDbRequest(BaseModel):
-    database_url: str
+class RouterTestRequest(BaseModel):
+    host: str
+    username: str = "admin"
+    password: Optional[str] = None
+
+class DatabaseTestRequest(BaseModel):
+    database: DatabaseConfigRequest
 
 @app.get("/api/devices")
 def get_devices(db: Session = Depends(get_db)):
@@ -392,41 +405,229 @@ def get_events(limit: int = 50, db: Session = Depends(get_db)):
 @app.get("/api/config")
 def get_config():
     from sqlalchemy.engine import make_url
-    def safe_database_display(database_url: str) -> str:
-        if not database_url:
-            return ""
+    
+    db_config = {
+        "type": "sqlite",
+        "filename": "monitor.db",
+        "host": "",
+        "port": 5432,
+        "name": "",
+        "user": "postgres",
+        "password_configured": False
+    }
+    
+    if settings.DATABASE_URL:
         try:
-            url = make_url(database_url)
-            if url.drivername.startswith("sqlite"):
-                return str(url)
-            return str(url.set(password="***" if url.password else None))
+            url = make_url(settings.DATABASE_URL)
+            if url.drivername.startswith("postgresql"):
+                db_config["type"] = "postgresql"
+                db_config["host"] = url.host or ""
+                db_config["port"] = url.port or 5432
+                db_config["name"] = url.database or ""
+                db_config["user"] = url.username or ""
+                db_config["password_configured"] = bool(url.password)
+            elif url.drivername.startswith("sqlite"):
+                db_config["type"] = "sqlite"
+                db_config["filename"] = os.path.basename(url.database) if url.database else "monitor.db"
         except Exception:
-            return "已配置"
+            pass
 
     return {
         "ruijie_host": settings.RUIJIE_HOST,
         "ruijie_user": settings.RUIJIE_USER,
-        "collector_mode": settings.COLLECTOR_MODE,
         "poll_interval": settings.POLL_INTERVAL,
         "router_password_configured": bool(settings.RUIJIE_PASS),
         "telegram_enable": settings.TELEGRAM_ENABLE,
         "telegram_token_configured": bool(settings.TELEGRAM_BOT_TOKEN),
         "telegram_chat_id": settings.TELEGRAM_CHAT_ID,
-        "database_url_configured": bool(settings.DATABASE_URL),
-        "database_url_display": safe_database_display(settings.DATABASE_URL)
+        "database": db_config
     }
 
-@app.post("/api/test_db")
-def test_db(req: TestDbRequest):
-    from sqlalchemy import create_engine
-    try:
-        tmp_engine = create_engine(req.database_url, pool_pre_ping=True)
-        with tmp_engine.connect() as conn:
+import sqlite3
+import tempfile
+import time
+from sqlalchemy import create_engine, text
+
+def resolve_database_url(config: DatabaseConfigRequest, existing_url: str) -> str:
+    if config.type == "sqlite":
+        return f"sqlite:///./data/{config.filename}"
+    
+    password = config.password
+    if not password:
+        # try to parse from existing url if host/port/name/user match
+        try:
+            from sqlalchemy.engine.url import make_url
+            url = make_url(existing_url)
+            if url.drivername.startswith("postgresql") and \
+               url.host == config.host and \
+               (url.port or 5432) == (config.port or 5432) and \
+               url.database == config.name and \
+               url.username == config.user:
+                password = url.password
+        except Exception:
             pass
-        return {"status": "success", "message": "连接测试成功！"}
-    except Exception:
-        logger.exception("Database connection test failed")
-        raise HTTPException(status_code=400, detail="数据库连接失败，请检查地址、账号和网络")
+
+    if not password:
+        raise HTTPException(status_code=422, detail="PostgreSQL 密码不能为空")
+        
+    return f"postgresql://{config.user}:{password}@{config.host}:{config.port}/{config.name}"
+
+def test_sqlite_location(filename: str):
+    data_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data"))
+    os.makedirs(data_dir, exist_ok=True)
+    
+    database_path = os.path.abspath(os.path.join(data_dir, filename))
+    if os.path.dirname(database_path) != data_dir:
+        raise HTTPException(400, "SQLite 文件路径无效")
+
+    if os.path.exists(database_path):
+        try:
+            with sqlite3.connect(database_path, timeout=5) as connection:
+                result = connection.execute("PRAGMA quick_check").fetchone()[0]
+                if result != "ok":
+                    raise RuntimeError(result)
+        except Exception as exc:
+            raise HTTPException(400, "SQLite 数据库文件不可用或已损坏") from exc
+    else:
+        fd, test_path = tempfile.mkstemp(prefix="sqlite-test-", dir=data_dir)
+        os.close(fd)
+        try:
+            with sqlite3.connect(test_path, timeout=5) as connection:
+                connection.execute("SELECT 1")
+        finally:
+            os.unlink(test_path)
+
+    return {
+        "status": "success",
+        "message": "SQLite 数据目录和文件可用",
+        "path": str(database_path),
+    }
+
+def test_postgresql_connection(url: str):
+    started = time.monotonic()
+    engine = create_engine(
+        url,
+        pool_pre_ping=True,
+        connect_args={"connect_timeout": 5},
+    )
+
+    try:
+        with engine.connect() as connection:
+            row = connection.execute(text(
+                "SELECT current_database(), current_user"
+            )).one()
+        return {
+            "status": "success",
+            "message": "PostgreSQL 连接成功",
+            "latency_ms": round((time.monotonic() - started) * 1000),
+            "database": row[0],
+            "user": row[1],
+        }
+    except Exception as exc:
+        logger.exception("PostgreSQL connection test failed")
+        raise HTTPException(
+            status_code=400,
+            detail="PostgreSQL 连接失败，请检查地址、端口、数据库名、用户名、密码及访问规则",
+        ) from exc
+    finally:
+        engine.dispose()
+
+@app.post("/api/router/test")
+def test_router_connection(req: RouterTestRequest):
+    import subprocess
+    import sys
+    
+    password = req.password
+    if not password:
+        if req.host == settings.RUIJIE_HOST and req.username == settings.RUIJIE_USER:
+            password = settings.RUIJIE_PASS
+        else:
+            raise HTTPException(422, "未提供密码，且无法继承已有密码")
+            
+    script_path = os.path.join(os.path.dirname(__file__), "scratch", "test_enc_login.py")
+    if not os.path.exists(script_path):
+        script_path = os.path.join(os.path.dirname(__file__), "..", "..", "scratch", "test_enc_login.py")
+    
+    # We will write a fast ephemeral playwright script to test login
+    import tempfile
+    
+    script_content = f"""
+import asyncio
+import time
+from playwright.async_api import async_playwright
+
+async def main():
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        context = await browser.new_context(ignore_https_errors=True)
+        page = await context.new_page()
+        try:
+            started = time.monotonic()
+            await page.goto("{req.host}/cgi-bin/luci/", timeout=10000)
+            await page.wait_for_selector("input[type=password]", timeout=5000)
+            await page.fill("input[type=password]", "{password}")
+            
+            # Wait for successful login indicator (like finding devices API or seeing main layout)
+            async with page.expect_response(lambda r: "/api/auth" in r.url or "/api/sysinfo" in r.url or "/api/network" in r.url, timeout=10000) as response_info:
+                await page.click("input[type=button]")
+            
+            resp = await response_info.value
+            if resp.status == 200:
+                print(f"SUCCESS {round((time.monotonic() - started) * 1000)}")
+            else:
+                print(f"ERROR API returned {resp.status}")
+        except Exception as e:
+            print(f"ERROR {{str(e)}}")
+        finally:
+            await browser.close()
+
+asyncio.run(main())
+"""
+    
+    fd, temp_path = tempfile.mkstemp(suffix=".py", text=True)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(script_content)
+            
+        started = time.monotonic()
+        proc = subprocess.run([sys.executable, temp_path], capture_output=True, text=True, timeout=20)
+        output = proc.stdout.strip()
+        
+        if "SUCCESS" in output:
+            latency = output.split("SUCCESS")[1].strip()
+            return {
+                "status": "success",
+                "message": "路由器连接且认证成功",
+                "latency_ms": int(latency)
+            }
+        else:
+            logger.error(f"Router test failed: {output} | {proc.stderr}")
+            raise HTTPException(400, "路由器连接或认证失败，请检查地址和密码")
+            
+    except subprocess.TimeoutExpired:
+        raise HTTPException(400, "测试超时，路由器未能及时响应")
+    except Exception as exc:
+        if isinstance(exc, HTTPException):
+            raise exc
+        logger.exception("Router test exception")
+        raise HTTPException(400, "内部错误：无法执行连通性测试")
+    finally:
+        os.unlink(temp_path)
+
+@app.post("/api/database/test")
+def test_database(req: DatabaseTestRequest):
+    config = req.database
+
+    if config.type == "sqlite":
+        if not config.filename:
+            raise HTTPException(422, "SQLite 文件名不能为空")
+        return test_sqlite_location(config.filename)
+    
+    if not all([config.host, config.port, config.name, config.user]):
+        raise HTTPException(422, "PostgreSQL 需要填写地址、端口、数据库名、用户名")
+
+    url = resolve_database_url(config, settings.DATABASE_URL)
+    return test_postgresql_connection(url)
 
 @app.post("/api/config")
 def update_config(req: SettingsUpdateRequest):
@@ -434,52 +635,27 @@ def update_config(req: SettingsUpdateRequest):
     old_pass = settings.RUIJIE_PASS
     restart_required = False
 
-    candidate_database_url = req.database_url
-    if candidate_database_url is not None:
-        candidate_database_url = candidate_database_url.strip()
-        if not candidate_database_url:
-            raise HTTPException(status_code=422, detail="数据库连接地址不能为空")
-
-        if candidate_database_url != settings.DATABASE_URL:
-            from sqlalchemy import create_engine, text
-            connect_args = {}
-            if candidate_database_url.startswith("sqlite:///"):
-                db_path = candidate_database_url.removeprefix("sqlite:///")
-                parent = os.path.dirname(os.path.abspath(db_path))
-                os.makedirs(parent, exist_ok=True)
-                if not os.access(parent, os.W_OK):
-                    raise HTTPException(status_code=400, detail="SQLite 数据目录不可写")
-            elif candidate_database_url.startswith("postgresql"):
-                connect_args["connect_timeout"] = 5
-
-            try:
-                engine = create_engine(candidate_database_url, connect_args=connect_args, pool_pre_ping=True)
-                with engine.connect() as connection:
-                    connection.execute(text("SELECT 1"))
-            except Exception as exc:
-                logger.exception("Candidate database validation failed")
-                raise HTTPException(
-                    status_code=400,
-                    detail="数据库连接失败，请检查地址、账号和网络"
-                ) from exc
-            finally:
-                engine.dispose()
-                
-            restart_required = True
+    candidate_database_url = resolve_database_url(req.database, settings.DATABASE_URL)
+    
+    if candidate_database_url != settings.DATABASE_URL:
+        if req.database.type == "sqlite":
+            test_sqlite_location(req.database.filename)
+        else:
+            test_postgresql_connection(candidate_database_url)
+            
+        restart_required = True
 
     settings.RUIJIE_HOST = req.ruijie_host
     settings.RUIJIE_USER = req.ruijie_user
     if req.ruijie_pass is not None:
         settings.RUIJIE_PASS = req.ruijie_pass
-    settings.COLLECTOR_MODE = req.collector_mode
     settings.POLL_INTERVAL = req.poll_interval
     if req.telegram_bot_token is not None:
         settings.TELEGRAM_BOT_TOKEN = req.telegram_bot_token
     settings.TELEGRAM_CHAT_ID = req.telegram_chat_id
     settings.TELEGRAM_ENABLE = req.telegram_enable
     
-    if candidate_database_url is not None:
-        settings.DATABASE_URL = candidate_database_url
+    settings.DATABASE_URL = candidate_database_url
         
     try:
         settings.save()
@@ -489,7 +665,6 @@ def update_config(req: SettingsUpdateRequest):
     
     ruijie_collector.host = settings.RUIJIE_HOST
     ruijie_collector.username = settings.RUIJIE_USER
-    ruijie_collector.mode = settings.COLLECTOR_MODE
     
     collector_restarted = False
     if old_host != settings.RUIJIE_HOST or old_pass != settings.RUIJIE_PASS:

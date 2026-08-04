@@ -53,7 +53,7 @@
       <div>
         <h1 class="text-2xl font-bold tracking-tight text-white flex items-center gap-3">
           锐捷网络 & AP/交换机位置追踪控制台
-          <span id="mode-badge" class="text-xs px-2.5 py-1 rounded-full font-medium bg-amber-500/20 text-amber-300 border border-amber-500/30">演示模式 (Demo)</span>
+          <span class="status-chip text-xs px-2.5 py-1 rounded-full font-medium bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">真实采集</span>
         </h1>
         <p class="text-sm text-slate-400 mt-1">关注 MAC 提醒 • AP/交换机漫游轨迹 • 实时带宽 • Telegram 实时推送</p>
       </div>
@@ -234,38 +234,71 @@
         <button onclick="closeConfigModal()" class="text-slate-400 hover:text-white"><i class="fa-solid fa-xmark"></i></button>
       </div>
       <form id="config-form" onsubmit="saveConfig(event)" class="space-y-4">
-        <div>
-          <label class="text-xs text-slate-400 block mb-1">采集模式</label>
-          <select id="cfg-mode" class="glass-input px-3 py-2 rounded-lg text-xs w-full">
-            <option value="demo">演示模式 (Demo Mock Data)</option>
-            <option value="live">锐捷路由器真实 API 采集模式 (Live Router API)</option>
-          </select>
+        <div class="flex items-center justify-between mb-1">
+          <label class="text-xs text-slate-400">锐捷路由器 Web 地址 (IP 或 URL)</label>
+          <button type="button" id="test-router-btn" onclick="testRouterConnection()" class="px-2 py-1 bg-blue-600/30 text-blue-400 hover:bg-blue-600/50 rounded text-[10px]">测试路由器连通性</button>
         </div>
         <div>
-          <label class="text-xs text-slate-400 block mb-1">锐捷路由器 Web 地址 (IP 或 URL)</label>
-          <input type="text" id="cfg-host" placeholder="https://192.168.8.1" class="glass-input px-3 py-2 rounded-lg text-xs w-full">
+          <input type="text" id="cfg-host" placeholder="https://192.168.8.1" oninput="invalidateRouterTest()" class="glass-input px-3 py-2 rounded-lg text-xs w-full">
+          <p id="router-test-result" class="text-[10px] mt-1 hidden"></p>
         </div>
         <div class="grid grid-cols-2 gap-4">
           <div>
             <label class="text-xs text-slate-400 block mb-1">登录用户名</label>
-            <input type="text" id="cfg-user" placeholder="admin" class="glass-input px-3 py-2 rounded-lg text-xs w-full">
+            <input type="text" id="cfg-user" placeholder="admin" oninput="invalidateRouterTest()" class="glass-input px-3 py-2 rounded-lg text-xs w-full">
           </div>
           <div>
             <label class="text-xs text-slate-400 block mb-1">登录密码</label>
-            <input type="password" id="cfg-pass" placeholder="******" class="glass-input px-3 py-2 rounded-lg text-xs w-full">
+            <input type="password" id="cfg-pass" placeholder="******" oninput="invalidateRouterTest()" class="glass-input px-3 py-2 rounded-lg text-xs w-full">
           </div>
         </div>
         
         <hr class="border-white/10 my-4">
         
         <div class="flex items-center justify-between mb-2">
-          <label class="text-xs font-semibold text-white">局域网数据库连接 (PostgreSQL / SQLite)</label>
-          <button type="button" onclick="testDatabase()" class="px-2 py-1 bg-emerald-600/30 text-emerald-400 hover:bg-emerald-600/50 rounded text-[10px]">连通性测试</button>
+          <label class="text-xs font-semibold text-white">局域网数据库连接</label>
+          <button type="button" id="test-db-btn" onclick="testDatabaseConnection()" class="px-2 py-1 bg-emerald-600/30 text-emerald-400 hover:bg-emerald-600/50 rounded text-[10px]">测试数据库连通性</button>
         </div>
         <div>
-          <input type="text" id="cfg-db-url" placeholder="postgresql://user:pass@192.168.8.11:5432/ruijie" class="glass-input px-3 py-2 rounded-lg text-xs w-full">
-          <p id="db-test-result" class="text-[10px] mt-1 hidden"></p>
+          <label class="text-xs text-slate-400 block mb-1">数据库类型</label>
+          <select id="cfg-db-type" onchange="toggleDbFields(); invalidateDatabaseTest()" class="glass-input px-3 py-2 rounded-lg text-xs w-full">
+            <option value="sqlite">SQLite 本地文件数据库</option>
+            <option value="postgresql">PostgreSQL 关系型数据库</option>
+          </select>
         </div>
+        
+        <div id="cfg-db-sqlite-group" class="space-y-2 mt-2">
+          <label class="text-xs text-slate-400 block mb-1">SQLite 文件名 (保存在 data 目录)</label>
+          <input type="text" id="cfg-db-filename" placeholder="monitor.db" oninput="invalidateDatabaseTest()" class="glass-input px-3 py-2 rounded-lg text-xs w-full">
+        </div>
+        
+        <div id="cfg-db-pg-group" class="space-y-3 mt-2 hidden">
+          <div class="grid grid-cols-2 gap-4">
+            <div>
+              <label class="text-xs text-slate-400 block mb-1">Host (地址)</label>
+              <input type="text" id="cfg-db-host" placeholder="192.168.8.11" oninput="invalidateDatabaseTest()" class="glass-input px-3 py-2 rounded-lg text-xs w-full">
+            </div>
+            <div>
+              <label class="text-xs text-slate-400 block mb-1">Port (端口)</label>
+              <input type="number" id="cfg-db-port" placeholder="5432" oninput="invalidateDatabaseTest()" class="glass-input px-3 py-2 rounded-lg text-xs w-full">
+            </div>
+          </div>
+          <div>
+            <label class="text-xs text-slate-400 block mb-1">Database Name (库名)</label>
+            <input type="text" id="cfg-db-name" placeholder="ruijie" oninput="invalidateDatabaseTest()" class="glass-input px-3 py-2 rounded-lg text-xs w-full">
+          </div>
+          <div class="grid grid-cols-2 gap-4">
+            <div>
+              <label class="text-xs text-slate-400 block mb-1">Username (用户名)</label>
+              <input type="text" id="cfg-db-user" placeholder="postgres" oninput="invalidateDatabaseTest()" class="glass-input px-3 py-2 rounded-lg text-xs w-full">
+            </div>
+            <div>
+              <label class="text-xs text-slate-400 block mb-1">Password (密码)</label>
+              <input type="password" id="cfg-db-pass" placeholder="已配置，留空保持" oninput="invalidateDatabaseTest()" class="glass-input px-3 py-2 rounded-lg text-xs w-full">
+            </div>
+          </div>
+        </div>
+        <p id="db-test-result" class="text-[10px] mt-1 hidden"></p>
 
         <hr class="border-white/10 my-4">
 
@@ -613,7 +646,6 @@
     async function openConfigModal() {
       const res = await fetch(`${API_BASE}/api/config`);
       const data = await res.json();
-      document.getElementById('cfg-mode').value = data.collector_mode;
       document.getElementById('cfg-host').value = data.ruijie_host;
       document.getElementById('cfg-user').value = data.ruijie_user;
       document.getElementById('cfg-interval').value = data.poll_interval;
@@ -628,41 +660,147 @@
       tgTokenInput.value = '';
       tgTokenInput.placeholder = data.telegram_token_configured ? '已配置，留空保持不变' : '请输入 Bot Token';
       
-      const dbUrlInput = document.getElementById('cfg-db-url');
-      dbUrlInput.value = '';
-      dbUrlInput.placeholder = data.database_url_display || '请输入数据库连接URL';
+      const db = data.database;
+      document.getElementById('cfg-db-type').value = db.type;
+      toggleDbFields();
+      
+      document.getElementById('cfg-db-filename').value = db.type === 'sqlite' ? db.filename : 'monitor.db';
+      document.getElementById('cfg-db-host').value = db.host || '';
+      document.getElementById('cfg-db-port').value = db.port || 5432;
+      document.getElementById('cfg-db-name').value = db.name || '';
+      document.getElementById('cfg-db-user').value = db.user || 'postgres';
+      
+      const dbPassInput = document.getElementById('cfg-db-pass');
+      dbPassInput.value = '';
+      dbPassInput.placeholder = db.password_configured ? '已配置，留空保持不变' : '请输入数据库密码';
 
       document.getElementById('config-modal').classList.remove('hidden');
       
       const testRes = document.getElementById('db-test-result');
       if (testRes) testRes.classList.add('hidden');
+      const rTestRes = document.getElementById('router-test-result');
+      if (rTestRes) rTestRes.classList.add('hidden');
+    }
+    
+    function toggleDbFields() {
+      const type = document.getElementById('cfg-db-type').value;
+      if (type === 'sqlite') {
+        document.getElementById('cfg-db-sqlite-group').classList.remove('hidden');
+        document.getElementById('cfg-db-pg-group').classList.add('hidden');
+      } else {
+        document.getElementById('cfg-db-sqlite-group').classList.add('hidden');
+        document.getElementById('cfg-db-pg-group').classList.remove('hidden');
+      }
     }
     
     function closeConfigModal() { document.getElementById('config-modal').classList.add('hidden'); }
     
-    async function testDatabase() {
-      const url = document.getElementById('cfg-db-url').value;
-      const resEl = document.getElementById('db-test-result');
+    function buildDatabasePayload() {
+      const type = document.getElementById('cfg-db-type').value;
+      if (type === 'sqlite') {
+        return {
+          type: 'sqlite',
+          filename: document.getElementById('cfg-db-filename').value.trim() || undefined
+        };
+      } else {
+        return {
+          type: 'postgresql',
+          host: document.getElementById('cfg-db-host').value.trim() || undefined,
+          port: Number(document.getElementById('cfg-db-port').value) || 5432,
+          name: document.getElementById('cfg-db-name').value.trim() || undefined,
+          user: document.getElementById('cfg-db-user').value.trim() || undefined,
+          password: document.getElementById('cfg-db-pass').value || undefined
+        };
+      }
+    }
+    
+    function invalidateRouterTest() {
+      const el = document.getElementById('router-test-result');
+      if (!el.classList.contains('hidden') && !el.innerText.includes('请求失败')) {
+        el.className = 'text-[10px] mt-1 text-amber-300';
+        el.innerText = '配置已修改，建议重新测试';
+      }
+    }
+
+    function invalidateDatabaseTest() {
+      const el = document.getElementById('db-test-result');
+      if (!el.classList.contains('hidden') && !el.innerText.includes('请求失败')) {
+        el.className = 'text-[10px] mt-1 text-amber-300';
+        el.innerText = '数据库配置已修改，建议重新测试';
+      }
+    }
+
+    async function testRouterConnection() {
+      const btn = document.getElementById('test-router-btn');
+      const resEl = document.getElementById('router-test-result');
+      
+      const payload = {
+        host: document.getElementById('cfg-host').value.trim(),
+        username: document.getElementById('cfg-user').value.trim(),
+        password: document.getElementById('cfg-pass').value || null
+      };
+
+      btn.disabled = true;
+      btn.innerText = '测试中...';
       resEl.classList.remove('hidden');
       resEl.className = 'text-[10px] mt-1 text-slate-400';
-      resEl.innerText = '测试中...';
-      
+      resEl.innerText = '正在启动无头浏览器模拟登录验证...';
+
       try {
-        const res = await fetch(`${API_BASE}/api/test_db`, {
+        const response = await fetch(`${API_BASE}/api/router/test`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ database_url: url })
+          body: JSON.stringify(payload)
         });
-        const data = await res.json();
-        if (data.status === 'success') {
-          resEl.className = 'text-[10px] mt-1 text-emerald-400';
-        } else {
-          resEl.className = 'text-[10px] mt-1 text-rose-400';
+        const result = await response.json().catch(() => ({}));
+        
+        if (!response.ok || result.status !== 'success') {
+          throw new Error(result.detail || result.message || '路由器连接测试失败');
         }
-        resEl.innerText = data.message;
+
+        resEl.className = 'text-[10px] mt-1 text-emerald-400';
+        resEl.innerText = `${result.message} · 延迟 ${result.latency_ms} ms`;
+      } catch (err) {
+        resEl.className = 'text-[10px] mt-1 text-rose-400';
+        resEl.innerText = err.message;
+      } finally {
+        btn.disabled = false;
+        btn.innerText = '测试路由器连通性';
+      }
+    }
+    
+    async function testDatabaseConnection() {
+      const btn = document.getElementById('test-db-btn');
+      const resEl = document.getElementById('db-test-result');
+      
+      btn.disabled = true;
+      btn.innerText = '测试中...';
+      resEl.classList.remove('hidden');
+      resEl.className = 'text-[10px] mt-1 text-slate-400';
+      resEl.innerText = '正在验证连接和数据库认证...';
+      
+      try {
+        const response = await fetch(`${API_BASE}/api/database/test`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ database: buildDatabasePayload() })
+        });
+        const result = await response.json().catch(() => ({}));
+
+        if (!response.ok || result.status !== 'success') {
+          throw new Error(result.detail || result.message || '数据库测试失败');
+        }
+
+        resEl.className = 'text-[10px] mt-1 text-emerald-400';
+        resEl.innerText = result.latency_ms 
+          ? `${result.message} · 延迟 ${result.latency_ms} ms` 
+          : result.message;
       } catch (e) {
         resEl.className = 'text-[10px] mt-1 text-rose-400';
         resEl.innerText = `请求失败: ${e.message}`;
+      } finally {
+        btn.disabled = false;
+        btn.innerText = '测试数据库连通性';
       }
     }
 
@@ -670,10 +808,8 @@
       e.preventDefault();
       const token = document.getElementById('cfg-tg-token').value.trim();
       const password = document.getElementById('cfg-pass').value;
-      const dbUrl = document.getElementById('cfg-db-url').value.trim();
       
       const payload = {
-        collector_mode: document.getElementById('cfg-mode').value,
         ruijie_host: document.getElementById('cfg-host').value.trim(),
         ruijie_user: document.getElementById('cfg-user').value.trim(),
         ruijie_pass: password || null,
@@ -681,7 +817,7 @@
         telegram_enable: document.getElementById('cfg-tg-enable').checked,
         telegram_bot_token: token || null,
         telegram_chat_id: document.getElementById('cfg-tg-chat').value.trim(),
-        database_url: dbUrl || null
+        database: buildDatabasePayload()
       };
 
       const errMsg = document.getElementById('config-error-msg');

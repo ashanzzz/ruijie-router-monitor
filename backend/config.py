@@ -11,8 +11,6 @@ class Settings:
     RUIJIE_USER: str = os.getenv("RUIJIE_USER", "admin")
     RUIJIE_PASS: str = os.getenv("RUIJIE_PASS", "")
     
-    # Mode: 'live' or 'demo'
-    COLLECTOR_MODE: str = os.getenv("COLLECTOR_MODE", "live")
     POLL_INTERVAL: int = int(os.getenv("POLL_INTERVAL", "3"))  # seconds
     
     # Telegram Notifications
@@ -36,7 +34,6 @@ class Settings:
             "RUIJIE_HOST": self.RUIJIE_HOST,
             "RUIJIE_USER": self.RUIJIE_USER,
             "RUIJIE_PASS": self.RUIJIE_PASS,
-            "COLLECTOR_MODE": self.COLLECTOR_MODE,
             "POLL_INTERVAL": str(self.POLL_INTERVAL),
             "TELEGRAM_BOT_TOKEN": self.TELEGRAM_BOT_TOKEN,
             "TELEGRAM_CHAT_ID": self.TELEGRAM_CHAT_ID,
