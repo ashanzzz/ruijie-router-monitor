@@ -695,6 +695,15 @@
     
     function closeConfigModal() { document.getElementById('config-modal').classList.add('hidden'); }
     
+    function errorMessage(result, fallback) {
+      if (typeof result.detail === 'string') return result.detail;
+      if (result.detail && typeof result.detail.message === 'string') {
+        return result.detail.message;
+      }
+      if (typeof result.message === 'string') return result.message;
+      return fallback;
+    }
+
     function buildDatabasePayload() {
       const type = document.getElementById('cfg-db-type').value;
       if (type === 'sqlite') {
@@ -755,7 +764,7 @@
         const result = await response.json().catch(() => ({}));
         
         if (!response.ok || result.status !== 'success') {
-          throw new Error(result.detail || result.message || '路由器连接测试失败');
+          throw new Error(errorMessage(result, '路由器连接测试失败'));
         }
 
         resEl.className = 'text-[10px] mt-1 text-emerald-400';

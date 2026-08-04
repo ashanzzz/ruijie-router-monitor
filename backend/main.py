@@ -529,90 +529,65 @@ def test_postgresql_connection(url: str):
             status_code=400,
             detail="PostgreSQL 连接失败，请检查地址、端口、数据库名、用户名、密码及访问规则",
         ) from exc
-    finally:
-        engine.dispose()
+from collector.router_probe import (
+    RouterAddressError,
+    RouterAuthenticationFailed,
+    RouterBrowserUnavailable,
+    RouterPageUnavailable,
+    RouterProbeError,
+    probe_ruijie_login,
+)
 
 @app.post("/api/router/test")
-def test_router_connection(req: RouterTestRequest):
-    import subprocess
-    import sys
-    
+async def test_router_connection(req: RouterTestRequest):
     password = req.password
-    if not password:
-        if req.host == settings.RUIJIE_HOST and req.username == settings.RUIJIE_USER:
-            password = settings.RUIJIE_PASS
-        else:
-            raise HTTPException(422, "未提供密码，且无法继承已有密码")
-            
-    script_path = os.path.join(os.path.dirname(__file__), "scratch", "test_enc_login.py")
-    if not os.path.exists(script_path):
-        script_path = os.path.join(os.path.dirname(__file__), "..", "..", "scratch", "test_enc_login.py")
-    
-    # We will write a fast ephemeral playwright script to test login
-    import tempfile
-    
-    script_content = f"""
-import asyncio
-import time
-from playwright.async_api import async_playwright
+    if password is None:
+        same_target = (
+            req.host.rstrip("/") == settings.RUIJIE_HOST.rstrip("/")
+            and req.username == settings.RUIJIE_USER
+        )
+        if not same_target or not settings.RUIJIE_PASS:
+            raise HTTPException(
+                status_code=422,
+                detail="请输入路由器密码",
+            )
+        password = settings.RUIJIE_PASS
 
-async def main():
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
-        context = await browser.new_context(ignore_https_errors=True)
-        page = await context.new_page()
-        try:
-            started = time.monotonic()
-            await page.goto("{req.host}/cgi-bin/luci/", timeout=10000)
-            await page.wait_for_selector("input[type=password]", timeout=5000)
-            await page.fill("input[type=password]", "{password}")
-            
-            # Wait for successful login indicator (like finding devices API or seeing main layout)
-            async with page.expect_response(lambda r: "/api/auth" in r.url or "/api/sysinfo" in r.url or "/api/network" in r.url, timeout=10000) as response_info:
-                await page.click("input[type=button]")
-            
-            resp = await response_info.value
-            if resp.status == 200:
-                print(f"SUCCESS {{round((time.monotonic() - started) * 1000)}}")
-            else:
-                print(f"ERROR API returned {{resp.status}}")
-        except Exception as e:
-            print(f"ERROR {{str(e)}}")
-        finally:
-            await browser.close()
-
-asyncio.run(main())
-"""
-    
-    fd, temp_path = tempfile.mkstemp(suffix=".py", text=True)
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(script_content)
-            
-        started = time.monotonic()
-        proc = subprocess.run([sys.executable, temp_path], capture_output=True, text=True, timeout=20)
-        output = proc.stdout.strip()
-        
-        if "SUCCESS" in output:
-            latency = output.split("SUCCESS")[1].strip()
-            return {
-                "status": "success",
-                "message": "路由器连接且认证成功",
-                "latency_ms": int(latency)
-            }
-        else:
-            logger.error(f"Router test failed: {output} | {proc.stderr}")
-            raise HTTPException(400, "路由器连接或认证失败，请检查地址和密码")
-            
-    except subprocess.TimeoutExpired:
-        raise HTTPException(400, "测试超时，路由器未能及时响应")
-    except Exception as exc:
-        if isinstance(exc, HTTPException):
-            raise exc
-        logger.exception("Router test exception")
-        raise HTTPException(400, "内部错误：无法执行连通性测试")
-    finally:
-        os.unlink(temp_path)
+        result = await probe_ruijie_login(
+            host=req.host,
+            password=password,
+        )
+    except RouterAddressError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except RouterAuthenticationFailed as exc:
+        raise HTTPException(
+            status_code=401,
+            detail={"code": exc.code, "stage": exc.stage, "message": str(exc)},
+        ) from exc
+    except RouterBrowserUnavailable as exc:
+        logger.exception("Router probe browser unavailable")
+        raise HTTPException(
+            status_code=503,
+            detail={"code": exc.code, "stage": exc.stage, "message": str(exc)},
+        ) from exc
+    except RouterPageUnavailable as exc:
+        raise HTTPException(
+            status_code=504,
+            detail={"code": exc.code, "stage": exc.stage, "message": str(exc)},
+        ) from exc
+    except RouterProbeError as exc:
+        logger.exception("Router probe failed")
+        raise HTTPException(
+            status_code=400,
+            detail={"code": exc.code, "stage": exc.stage, "message": str(exc)},
+        ) from exc
+
+    return {
+        "status": "success",
+        "message": "后台服务器已连接路由器并完成认证",
+        "latency_ms": result.latency_ms,
+    }
 
 @app.post("/api/database/test")
 def test_database(req: DatabaseTestRequest):
