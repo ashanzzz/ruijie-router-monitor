@@ -343,10 +343,15 @@
         if (data.type === 'DEVICE_UPDATE') {
           devicesData = data.devices;
           document.getElementById('mode-badge').innerText = data.mode === 'demo' ? '演示模式 (Demo)' : '真实路由器采集 (Live)';
+          if (data.timestamp) {
+            document.getElementById('ws-text').innerText = `后台自动检查 · 数据更新于: ${new Date(data.timestamp).toLocaleTimeString()}`;
+          } else {
+            document.getElementById('ws-text').innerText = '已连接';
+          }
           renderMetrics();
           renderAPFilters();
           renderDevices();
-          updateChart();
+          updateChart(data.timestamp);
         }
       };
 
@@ -357,24 +362,31 @@
       };
     }
 
+    function formatRate(kbPerSecond) {
+      const value = Number(kbPerSecond || 0);
+      if (value >= 1024 * 1024) return `${(value / 1024 / 1024).toFixed(2)} GB/s`;
+      if (value >= 1024) return `${(value / 1024).toFixed(2)} MB/s`;
+      return `${value.toFixed(1)} KB/s`;
+    }
+
     function renderMetrics() {
-      const onlineCount = devicesData.filter(d => d.is_online).length;
-      const starredCount = devicesData.filter(d => d.is_starred).length;
-      const activeCount = devicesData.filter(d => d.usage_state.includes('🔥')).length;
-      const apCount = new Set(devicesData.map(d => d.ap_name)).size;
+      const onlineDevices = devicesData.filter(d => d.is_online);
+      const starredCount = onlineDevices.filter(d => d.is_starred).length;
+      const activeCount = onlineDevices.filter(d => String(d.usage_state || '').includes('🔥')).length;
+      const apCount = new Set(onlineDevices.map(d => d.ap_name).filter(Boolean)).size;
       
       let totalDown = 0, totalUp = 0;
-      devicesData.forEach(d => {
-        totalDown += d.rx_rate || 0;
-        totalUp += d.tx_rate || 0;
+      onlineDevices.forEach(d => {
+        totalDown += Number(d.rx_rate || 0);
+        totalUp += Number(d.tx_rate || 0);
       });
 
-      document.getElementById('stat-online-count').innerText = onlineCount;
+      document.getElementById('stat-online-count').innerText = onlineDevices.length;
       document.getElementById('stat-starred-count').innerText = starredCount;
       document.getElementById('stat-active-count').innerText = activeCount;
       document.getElementById('stat-ap-count').innerText = apCount;
-      document.getElementById('stat-total-down').innerText = `${totalDown.toFixed(1)} KB/s`;
-      document.getElementById('stat-total-up').innerText = `${totalUp.toFixed(1)} KB/s`;
+      document.getElementById('stat-total-down').innerText = formatRate(totalDown);
+      document.getElementById('stat-total-up').innerText = formatRate(totalUp);
     }
 
     function renderAPFilters() {
@@ -448,7 +460,7 @@
           <td class="p-4">
             <button onclick="viewHistory('${d.mac}', '${d.display_name}')" class="text-left group">
               <div class="text-slate-200 font-semibold flex items-center gap-1.5 group-hover:text-emerald-400 transition-colors">
-                <i class="fa-solid fa-location-dot text-emerald-400"></i> ${d.ap_name}
+                <i class="fa-solid fa-location-dot text-emerald-400"></i> ${d.is_online ? '当前位置' : '最后连接'}：${d.ap_name}
               </div>
               <div class="text-[10px] text-slate-400 flex items-center gap-1 mt-0.5">
                 <span>SSID: ${d.ssid || '未指示'}</span>
@@ -456,8 +468,8 @@
               </div>
             </button>
           </td>
-          <td class="p-4 font-mono font-bold text-emerald-400">${d.rx_rate}</td>
-          <td class="p-4 font-mono font-bold text-purple-400">${d.tx_rate}</td>
+          <td class="p-4 font-mono font-bold text-emerald-400">${d.is_online ? formatRate(d.rx_rate) : '--'}</td>
+          <td class="p-4 font-mono font-bold text-purple-400">${d.is_online ? formatRate(d.tx_rate) : '--'}</td>
           <td class="p-4">
             <span class="px-2.5 py-1 rounded-full text-[11px] font-medium ${
               d.usage_state.includes('🔥') ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30' :
@@ -530,14 +542,17 @@
       document.getElementById('history-modal').classList.add('hidden');
     }
 
-    function updateChart() {
-      const nowStr = new Date().toLocaleTimeString();
+    function updateChart(timestamp) {
+      const nowStr = timestamp ? new Date(timestamp).toLocaleTimeString() : new Date().toLocaleTimeString();
       let totalDown = 0, totalUp = 0;
-      devicesData.forEach(d => { totalDown += d.rx_rate || 0; totalUp += d.tx_rate || 0; });
+      devicesData.filter(d => d.is_online).forEach(d => { 
+        totalDown += Number(d.rx_rate || 0); 
+        totalUp += Number(d.tx_rate || 0); 
+      });
 
       chartTimeData.push(nowStr);
-      chartDownData.push(totalDown.toFixed(1));
-      chartUpData.push(totalUp.toFixed(1));
+      chartDownData.push(Number(totalDown.toFixed(1)));
+      chartUpData.push(Number(totalUp.toFixed(1)));
 
       if (chartTimeData.length > 20) {
         chartTimeData.shift();
@@ -599,13 +614,24 @@
       document.getElementById('cfg-user').value = data.ruijie_user;
       document.getElementById('cfg-interval').value = data.poll_interval;
       document.getElementById('cfg-tg-enable').checked = data.telegram_enable;
-      document.getElementById('cfg-tg-token').value = data.telegram_bot_token;
       document.getElementById('cfg-tg-chat').value = data.telegram_chat_id;
-      document.getElementById('cfg-db-url').value = data.database_url || "";
+      
+      const passInput = document.getElementById('cfg-pass');
+      passInput.value = '';
+      passInput.placeholder = data.router_password_configured ? '已配置，留空保持不变' : '请输入密码';
+      
+      const tgTokenInput = document.getElementById('cfg-tg-token');
+      tgTokenInput.value = '';
+      tgTokenInput.placeholder = data.telegram_token_configured ? '已配置，留空保持不变' : '请输入 Bot Token';
+      
+      const dbUrlInput = document.getElementById('cfg-db-url');
+      dbUrlInput.value = '';
+      dbUrlInput.placeholder = data.database_url_display || '请输入数据库连接URL';
+
       document.getElementById('config-modal').classList.remove('hidden');
       
       const testRes = document.getElementById('db-test-result');
-      testRes.classList.add('hidden');
+      if (testRes) testRes.classList.add('hidden');
     }
     
     function closeConfigModal() { document.getElementById('config-modal').classList.add('hidden'); }
@@ -638,15 +664,20 @@
 
     async function saveConfig(e) {
       e.preventDefault();
+      const token = document.getElementById('cfg-tg-token').value.trim();
+      const password = document.getElementById('cfg-pass').value;
+      const dbUrl = document.getElementById('cfg-db-url').value.trim();
+      
       const payload = {
         collector_mode: document.getElementById('cfg-mode').value,
-        ruijie_host: document.getElementById('cfg-host').value,
-        ruijie_user: document.getElementById('cfg-user').value,
-        ruijie_pass: document.getElementById('cfg-pass').value,
-        poll_interval: parseInt(document.getElementById('cfg-interval').value),
+        ruijie_host: document.getElementById('cfg-host').value.trim(),
+        ruijie_user: document.getElementById('cfg-user').value.trim(),
+        ruijie_pass: password || null,
+        poll_interval: Number(document.getElementById('cfg-interval').value),
         telegram_enable: document.getElementById('cfg-tg-enable').checked,
-        telegram_bot_token: document.getElementById('cfg-tg-token').value,
-        telegram_chat_id: document.getElementById('cfg-tg-chat').value
+        telegram_bot_token: token || null,
+        telegram_chat_id: document.getElementById('cfg-tg-chat').value.trim(),
+        database_url: dbUrl || null
       };
 
       const errMsg = document.getElementById('config-error-msg');

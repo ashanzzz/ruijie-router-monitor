@@ -24,34 +24,37 @@ class Settings:
     DATABASE_URL: str = os.getenv("DATABASE_URL", "sqlite:///./data/monitor.db")
 
     def save(self):
+        import tempfile
+        def _quote_env(value: str) -> str:
+            escaped = value.replace('\\', '\\\\').replace('"', '\\"')
+            return f'"{escaped}"'
+
         env_file = os.path.join(os.path.dirname(__file__), ".env")
-        lines = []
-        if os.path.exists(env_file):
-            with open(env_file, "r", encoding="utf-8") as f:
-                lines = f.readlines()
-                
-        # Parse existing
-        env_dict = {}
-        for line in lines:
-            line = line.strip()
-            if line and not line.startswith("#") and "=" in line:
-                k, v = line.split("=", 1)
-                env_dict[k] = v
-                
-        # Update
-        env_dict["RUIJIE_HOST"] = self.RUIJIE_HOST
-        env_dict["RUIJIE_USER"] = self.RUIJIE_USER
-        env_dict["RUIJIE_PASS"] = self.RUIJIE_PASS
-        env_dict["COLLECTOR_MODE"] = self.COLLECTOR_MODE
-        env_dict["POLL_INTERVAL"] = str(self.POLL_INTERVAL)
-        env_dict["TELEGRAM_BOT_TOKEN"] = self.TELEGRAM_BOT_TOKEN
-        env_dict["TELEGRAM_CHAT_ID"] = self.TELEGRAM_CHAT_ID
-        env_dict["TELEGRAM_ENABLE"] = str(self.TELEGRAM_ENABLE).lower()
-        env_dict["DATABASE_URL"] = self.DATABASE_URL
+        env_dir = os.path.dirname(env_file)
         
-        # Write back
-        with open(env_file, "w", encoding="utf-8") as f:
-            for k, v in env_dict.items():
-                f.write(f"{k}={v}\n")
+        values = {
+            "RUIJIE_HOST": self.RUIJIE_HOST,
+            "RUIJIE_USER": self.RUIJIE_USER,
+            "RUIJIE_PASS": self.RUIJIE_PASS,
+            "COLLECTOR_MODE": self.COLLECTOR_MODE,
+            "POLL_INTERVAL": str(self.POLL_INTERVAL),
+            "TELEGRAM_BOT_TOKEN": self.TELEGRAM_BOT_TOKEN,
+            "TELEGRAM_CHAT_ID": self.TELEGRAM_CHAT_ID,
+            "TELEGRAM_ENABLE": str(self.TELEGRAM_ENABLE).lower(),
+            "DATABASE_URL": self.DATABASE_URL,
+        }
+        
+        fd, temp_path = tempfile.mkstemp(prefix=".env.", dir=env_dir, text=True)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                for k, v in values.items():
+                    f.write(f"{k}={_quote_env(str(v))}\n")
+                f.flush()
+                os.fsync(f.fileno())
+            os.chmod(temp_path, 0o600)
+            os.replace(temp_path, env_file)
+        finally:
+            if os.path.exists(temp_path):
+                os.unlink(temp_path)
 
 settings = Settings()

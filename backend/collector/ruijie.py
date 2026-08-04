@@ -21,13 +21,15 @@ class RuijieCollector:
     """
 
     def __init__(self):
+        from config import settings
         self.host = settings.RUIJIE_HOST.rstrip('/')
         self.username = settings.RUIJIE_USER
         self.password = settings.RUIJIE_PASS
         self.mode = settings.COLLECTOR_MODE
-        
         self.data_file = os.path.join(os.path.dirname(__file__), "ruijie_data.json")
+        self.ap_sn_map = {}
         self.daemon_started = False
+        self.last_snapshot_sequence = None
         
         # 缓存终端上次字节量用于精确计算速率
         self.last_bytes_cache: Dict[str, Dict[str, Any]] = {}
@@ -94,12 +96,12 @@ class RuijieCollector:
         for child in node.get("children", []):
             self._build_ap_map(child)
 
-    async def fetch_devices(self) -> List[Dict[str, Any]]:
+    async def fetch_devices(self) -> Dict[str, Any] | None:
         """
         获取全网终端与 AP 拓扑关联数据
         """
         if self.mode == "demo":
-            return self._get_demo_devices()
+            return {"sequence": int(time.time()), "generated_at": datetime.now(timezone.utc).isoformat(), "devices": self._get_demo_devices()}
 
         self._start_daemon()
         
@@ -114,16 +116,27 @@ class RuijieCollector:
                         self._build_ap_map(topo.get("topo", {}))
                         
                     user_list = data.get("user_list")
+                    sequence = data.get("sequence", 0)
+                    generated_at = data.get("generated_at", datetime.now(timezone.utc).isoformat())
+
+                    if sequence == self.last_snapshot_sequence:
+                        return None
+                        
+                    self.last_snapshot_sequence = sequence
+                    
+                    devices = []
                     if isinstance(user_list, dict) and "list" in user_list:
                         clients = user_list.get("list", [])
                         if len(clients) > 0:
-                            return self._parse_ruijie_clients(clients)
+                            devices = self._parse_ruijie_clients(clients)
                     elif isinstance(user_list, list) and len(user_list) > 0:
-                        return self._parse_ruijie_clients(user_list)
+                        devices = self._parse_ruijie_clients(user_list)
+                        
+                    return {"sequence": sequence, "generated_at": generated_at, "devices": devices}
         except Exception as e:
             logger.error(f"Failed to read devices: {e}")
 
-        return self._get_demo_devices()
+        return {"sequence": int(time.time()), "generated_at": datetime.now(timezone.utc).isoformat(), "devices": self._get_demo_devices()}
 
     def _parse_ruijie_clients(self, raw_list: list) -> List[Dict[str, Any]]:
         parsed = []

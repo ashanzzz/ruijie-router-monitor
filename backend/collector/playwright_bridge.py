@@ -4,12 +4,7 @@ import json
 import sys
 import time
 import os
-import os
-
-# Force stdout to flush
-sys.stdout.reconfigure(line_buffering=True)
-
-import os
+from datetime import datetime, timezone
 
 # Force stdout to flush
 sys.stdout.reconfigure(line_buffering=True)
@@ -25,8 +20,10 @@ async def daemon(host, password, output_file):
                 page = await context.new_page()
                 
                 data_cache = {"topology": None, "user_list": None}
+                sequence = 0
 
                 async def handle_response(response):
+                    nonlocal sequence
                     if "api/cmd" in response.url and response.request.method == "POST":
                         try:
                             post_data = response.request.post_data
@@ -41,7 +38,18 @@ async def daemon(host, password, output_file):
                                 d = json.loads(text)
                                 if d.get("code") == 0:
                                     data_cache["user_list"] = d.get("data")
-                                    print("Captured user_list", flush=True)
+                                    sequence += 1
+                                    data_cache["sequence"] = sequence
+                                    data_cache["generated_at"] = datetime.now(timezone.utc).isoformat()
+                                    
+                                    # Atomic write
+                                    temp_file = f"{output_file}.tmp"
+                                    with open(temp_file, "w", encoding="utf-8") as f:
+                                        json.dump(data_cache, f)
+                                        f.flush()
+                                        os.fsync(f.fileno())
+                                    os.replace(temp_file, output_file)
+                                    print(f"Wrote ruijie_data.json (seq: {sequence})", flush=True)
                         except Exception as e:
                             pass
 
@@ -85,11 +93,6 @@ async def daemon(host, password, output_file):
                                 
                         await asyncio.sleep(4)
                         
-                        if data_cache.get("topology") or data_cache.get("user_list"):
-                            with open(output_file, "w", encoding="utf-8") as f:
-                                json.dump(data_cache, f)
-                            print("Wrote ruijie_data.json", flush=True)
-                                
                         await asyncio.sleep(5)
                     except Exception as e:
                         print("Loop error:", e, flush=True)

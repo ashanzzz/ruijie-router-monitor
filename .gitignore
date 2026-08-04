@@ -41,3 +41,11 @@ test*.py
 # OS Files
 .DS_Store
 Thumbs.db
+
+# Sensitive & Runtime
+backend/.env
+.env
+*.db
+*.db-wal
+*.db-shm
+backend/collector/ruijie_data.json

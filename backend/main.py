@@ -59,7 +59,12 @@ async def poll_router_loop():
     logger.info("Starting background router polling loop...")
     while True:
         try:
-            raw_devices = await ruijie_collector.fetch_devices()
+            snapshot = await ruijie_collector.fetch_devices()
+            if snapshot is None:
+                await asyncio.sleep(settings.POLL_INTERVAL)
+                continue
+                
+            raw_devices = snapshot["devices"]
             db: Session = SessionLocal()
             try:
                 current_macs = set()
@@ -183,6 +188,9 @@ async def poll_router_loop():
                     if dev.mac not in current_macs:
                         dev.is_online = False
                         dev.last_offline_at = datetime.utcnow()
+                        dev.rx_rate = 0.0
+                        dev.tx_rate = 0.0
+                        dev.usage_state = "离线"
                         
                         # Close active session
                         active_session = db.query(ConnectionHistory).filter(
@@ -248,16 +256,18 @@ class AliasUpdateRequest(BaseModel):
 class StarUpdateRequest(BaseModel):
     is_starred: bool
 
+from typing import Optional
+
 class SettingsUpdateRequest(BaseModel):
     ruijie_host: str
-    ruijie_user: str
-    ruijie_pass: str
+    ruijie_user: str = "admin"
+    ruijie_pass: Optional[str] = None
     collector_mode: str
     poll_interval: int
-    telegram_bot_token: str
-    telegram_chat_id: str
-    telegram_enable: bool
-    database_url: str
+    telegram_bot_token: Optional[str] = None
+    telegram_chat_id: str = ""
+    telegram_enable: bool = False
+    database_url: Optional[str] = None
 
 class TestDbRequest(BaseModel):
     database_url: str
@@ -371,15 +381,29 @@ def get_events(limit: int = 50, db: Session = Depends(get_db)):
 
 @app.get("/api/config")
 def get_config():
+    from sqlalchemy.engine import make_url
+    def safe_database_display(database_url: str) -> str:
+        if not database_url:
+            return ""
+        try:
+            url = make_url(database_url)
+            if url.drivername.startswith("sqlite"):
+                return str(url)
+            return str(url.set(password="***" if url.password else None))
+        except Exception:
+            return "已配置"
+
     return {
         "ruijie_host": settings.RUIJIE_HOST,
         "ruijie_user": settings.RUIJIE_USER,
         "collector_mode": settings.COLLECTOR_MODE,
         "poll_interval": settings.POLL_INTERVAL,
+        "router_password_configured": bool(settings.RUIJIE_PASS),
         "telegram_enable": settings.TELEGRAM_ENABLE,
-        "telegram_bot_token": settings.TELEGRAM_BOT_TOKEN[:5] + "******" if settings.TELEGRAM_BOT_TOKEN else "",
+        "telegram_token_configured": bool(settings.TELEGRAM_BOT_TOKEN),
         "telegram_chat_id": settings.TELEGRAM_CHAT_ID,
-        "database_url": settings.DATABASE_URL
+        "database_url_configured": bool(settings.DATABASE_URL),
+        "database_url_display": safe_database_display(settings.DATABASE_URL)
     }
 
 @app.post("/api/test_db")
@@ -390,8 +414,9 @@ def test_db(req: TestDbRequest):
         with tmp_engine.connect() as conn:
             pass
         return {"status": "success", "message": "连接测试成功！"}
-    except Exception as e:
-        return {"status": "error", "message": f"数据库连接失败: {str(e)}"}
+    except Exception:
+        logger.exception("Database connection test failed")
+        raise HTTPException(status_code=400, detail="数据库连接失败，请检查地址、账号和网络")
 
 @app.post("/api/config")
 def update_config(req: SettingsUpdateRequest):
@@ -400,17 +425,17 @@ def update_config(req: SettingsUpdateRequest):
     
     settings.RUIJIE_HOST = req.ruijie_host
     settings.RUIJIE_USER = req.ruijie_user
-    if req.ruijie_pass:
+    if req.ruijie_pass is not None:
         settings.RUIJIE_PASS = req.ruijie_pass
     settings.COLLECTOR_MODE = req.collector_mode
     settings.POLL_INTERVAL = req.poll_interval
-    if req.telegram_bot_token and "***" not in req.telegram_bot_token:
+    if req.telegram_bot_token is not None:
         settings.TELEGRAM_BOT_TOKEN = req.telegram_bot_token
     settings.TELEGRAM_CHAT_ID = req.telegram_chat_id
     settings.TELEGRAM_ENABLE = req.telegram_enable
     
     old_db_url = settings.DATABASE_URL
-    if req.database_url:
+    if req.database_url is not None:
         settings.DATABASE_URL = req.database_url
         
     # Persistent Save
