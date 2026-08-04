@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environment
+venv/
+.venv/
+env/
+.env
+
+# Database (SQLite)
+data/*.db
+data/*.sqlite
+data/*.sqlite3
+
+# Playwright & Debugging
+ruijie_data.json
+.system_generated/
+scratch/
+test*.py
+*.log
+
+# OS Files
+.DS_Store
+Thumbs.db
