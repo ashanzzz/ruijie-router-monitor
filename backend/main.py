@@ -573,9 +573,9 @@ async def main():
             
             resp = await response_info.value
             if resp.status == 200:
-                print(f"SUCCESS {round((time.monotonic() - started) * 1000)}")
+                print(f"SUCCESS {{round((time.monotonic() - started) * 1000)}}")
             else:
-                print(f"ERROR API returned {resp.status}")
+                print(f"ERROR API returned {{resp.status}}")
         except Exception as e:
             print(f"ERROR {{str(e)}}")
         finally:
