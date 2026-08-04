@@ -231,7 +231,8 @@ async def poll_router_loop():
                 # Broadcast live update to all open Web UIs
                 await manager.broadcast({
                     "type": "DEVICE_UPDATE",
-                    "timestamp": datetime.utcnow().isoformat(),
+                    "snapshot_id": snapshot.get("snapshot_id"),
+                    "timestamp": snapshot.get("generated_at", datetime.utcnow().isoformat()),
                     "mode": settings.COLLECTOR_MODE,
                     "devices": device_list
                 })
@@ -256,18 +257,27 @@ class AliasUpdateRequest(BaseModel):
 class StarUpdateRequest(BaseModel):
     is_starred: bool
 
-from typing import Optional
+from typing import Optional, Literal
+from pydantic import Field, field_validator
 
 class SettingsUpdateRequest(BaseModel):
-    ruijie_host: str
-    ruijie_user: str = "admin"
-    ruijie_pass: Optional[str] = None
-    collector_mode: str
-    poll_interval: int
-    telegram_bot_token: Optional[str] = None
-    telegram_chat_id: str = ""
+    ruijie_host: str = Field(min_length=4, max_length=255)
+    ruijie_user: str = Field(default="admin", max_length=128)
+    ruijie_pass: Optional[str] = Field(default=None, max_length=512)
+    collector_mode: Literal["live", "demo"]
+    poll_interval: int = Field(ge=3, le=300)
+    telegram_bot_token: Optional[str] = Field(default=None, max_length=256)
+    telegram_chat_id: str = Field(default="", max_length=128)
     telegram_enable: bool = False
-    database_url: Optional[str] = None
+    database_url: Optional[str] = Field(default=None, max_length=2048)
+
+    @field_validator("ruijie_host")
+    @classmethod
+    def normalize_host(cls, value: str) -> str:
+        value = value.strip().rstrip("/")
+        if not value.startswith(("http://", "https://")):
+            raise ValueError("必须以 http:// 或 https:// 开头")
+        return value
 
 class TestDbRequest(BaseModel):
     database_url: str
@@ -422,7 +432,41 @@ def test_db(req: TestDbRequest):
 def update_config(req: SettingsUpdateRequest):
     old_host = settings.RUIJIE_HOST
     old_pass = settings.RUIJIE_PASS
-    
+    restart_required = False
+
+    candidate_database_url = req.database_url
+    if candidate_database_url is not None:
+        candidate_database_url = candidate_database_url.strip()
+        if not candidate_database_url:
+            raise HTTPException(status_code=422, detail="数据库连接地址不能为空")
+
+        if candidate_database_url != settings.DATABASE_URL:
+            from sqlalchemy import create_engine, text
+            connect_args = {}
+            if candidate_database_url.startswith("sqlite:///"):
+                db_path = candidate_database_url.removeprefix("sqlite:///")
+                parent = os.path.dirname(os.path.abspath(db_path))
+                os.makedirs(parent, exist_ok=True)
+                if not os.access(parent, os.W_OK):
+                    raise HTTPException(status_code=400, detail="SQLite 数据目录不可写")
+            elif candidate_database_url.startswith("postgresql"):
+                connect_args["connect_timeout"] = 5
+
+            try:
+                engine = create_engine(candidate_database_url, connect_args=connect_args, pool_pre_ping=True)
+                with engine.connect() as connection:
+                    connection.execute(text("SELECT 1"))
+            except Exception as exc:
+                logger.exception("Candidate database validation failed")
+                raise HTTPException(
+                    status_code=400,
+                    detail="数据库连接失败，请检查地址、账号和网络"
+                ) from exc
+            finally:
+                engine.dispose()
+                
+            restart_required = True
+
     settings.RUIJIE_HOST = req.ruijie_host
     settings.RUIJIE_USER = req.ruijie_user
     if req.ruijie_pass is not None:
@@ -434,33 +478,34 @@ def update_config(req: SettingsUpdateRequest):
     settings.TELEGRAM_CHAT_ID = req.telegram_chat_id
     settings.TELEGRAM_ENABLE = req.telegram_enable
     
-    old_db_url = settings.DATABASE_URL
-    if req.database_url is not None:
-        settings.DATABASE_URL = req.database_url
+    if candidate_database_url is not None:
+        settings.DATABASE_URL = candidate_database_url
         
-    # Persistent Save
-    settings.save()
+    try:
+        settings.save()
+    except OSError as exc:
+        logger.exception("Failed to persist configuration")
+        raise HTTPException(status_code=500, detail="配置文件保存失败") from exc
     
     ruijie_collector.host = settings.RUIJIE_HOST
     ruijie_collector.username = settings.RUIJIE_USER
     ruijie_collector.mode = settings.COLLECTOR_MODE
     
+    collector_restarted = False
     if old_host != settings.RUIJIE_HOST or old_pass != settings.RUIJIE_PASS:
         ruijie_collector.restart(settings.RUIJIE_HOST, settings.RUIJIE_PASS)
+        collector_restarted = True
     
     telegram_notifier.bot_token = settings.TELEGRAM_BOT_TOKEN
     telegram_notifier.chat_id = settings.TELEGRAM_CHAT_ID
     telegram_notifier.enabled = settings.TELEGRAM_ENABLE
     
-    # Reload engine if DB URL changed
-    if old_db_url != settings.DATABASE_URL:
-        try:
-            reinit_engine(settings.DATABASE_URL)
-        except Exception as e:
-            logger.error(f"Failed to reinit engine: {e}")
-            return {"status": "error", "message": f"配置已保存，但数据库重载失败: {str(e)}"}
-    
-    return {"status": "success", "message": "配置已成功更新"}
+    return {
+        "status": "success", 
+        "message": "配置已成功更新",
+        "restart_required": restart_required,
+        "collector_restarted": collector_restarted
+    }
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):

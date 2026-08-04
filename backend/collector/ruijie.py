@@ -8,6 +8,7 @@ import httpx
 import subprocess
 import os
 import sys
+from datetime import datetime, timezone
 
 from config import settings
 from collector.traffic_analyzer import TrafficAnalyzer
@@ -27,9 +28,9 @@ class RuijieCollector:
         self.password = settings.RUIJIE_PASS
         self.mode = settings.COLLECTOR_MODE
         self.data_file = os.path.join(os.path.dirname(__file__), "ruijie_data.json")
-        self.ap_sn_map = {}
         self.daemon_started = False
-        self.last_snapshot_sequence = None
+        self._daemon_process = None
+        self.last_snapshot_id: tuple[str, int] | None = None
         
         # 缓存终端上次字节量用于精确计算速率
         self.last_bytes_cache: Dict[str, Dict[str, Any]] = {}
@@ -100,8 +101,11 @@ class RuijieCollector:
         """
         获取全网终端与 AP 拓扑关联数据
         """
+        def _utc_iso_now() -> str:
+            return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
         if self.mode == "demo":
-            return {"sequence": int(time.time()), "generated_at": datetime.now(timezone.utc).isoformat(), "devices": self._get_demo_devices()}
+            return {"snapshot_id": f"demo:{int(time.time_ns())}", "generated_at": _utc_iso_now(), "devices": self._get_demo_devices()}
 
         self._start_daemon()
         
@@ -117,12 +121,27 @@ class RuijieCollector:
                         
                     user_list = data.get("user_list")
                     sequence = data.get("sequence", 0)
-                    generated_at = data.get("generated_at", datetime.now(timezone.utc).isoformat())
+                    bridge_process_id = data.get("bridge_process_id", "")
+                    raw_generated_at = data.get("generated_at")
 
-                    if sequence == self.last_snapshot_sequence:
+                    if not isinstance(bridge_process_id, str) or not bridge_process_id:
+                        return None
+                    if not isinstance(sequence, int) or sequence < 1:
                         return None
                         
-                    self.last_snapshot_sequence = sequence
+                    snapshot_id = (bridge_process_id, sequence)
+                    if snapshot_id == self.last_snapshot_id:
+                        return None
+
+                    if isinstance(raw_generated_at, str):
+                        try:
+                            gen_time = datetime.fromisoformat(raw_generated_at.replace("Z", "+00:00"))
+                            age_seconds = (datetime.now(timezone.utc) - gen_time).total_seconds()
+                            if age_seconds < -5 or age_seconds > 60:
+                                logger.warning(f"Skipping stale snapshot (age: {age_seconds}s)")
+                                return None
+                        except ValueError:
+                            pass
                     
                     devices = []
                     if isinstance(user_list, dict) and "list" in user_list:
@@ -131,12 +150,17 @@ class RuijieCollector:
                             devices = self._parse_ruijie_clients(clients)
                     elif isinstance(user_list, list) and len(user_list) > 0:
                         devices = self._parse_ruijie_clients(user_list)
-                        
-                    return {"sequence": sequence, "generated_at": generated_at, "devices": devices}
+                    
+                    self.last_snapshot_id = snapshot_id
+                    return {
+                        "snapshot_id": f"{bridge_process_id}:{sequence}",
+                        "generated_at": raw_generated_at or _utc_iso_now(),
+                        "devices": devices
+                    }
         except Exception as e:
             logger.error(f"Failed to read devices: {e}")
 
-        return {"sequence": int(time.time()), "generated_at": datetime.now(timezone.utc).isoformat(), "devices": self._get_demo_devices()}
+        return {"snapshot_id": f"demo:{int(time.time_ns())}", "generated_at": _utc_iso_now(), "devices": self._get_demo_devices()}
 
     def _parse_ruijie_clients(self, raw_list: list) -> List[Dict[str, Any]]:
         parsed = []

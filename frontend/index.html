@@ -305,6 +305,7 @@
     let currentAPFilter = 'ALL';
     let starredOnly = false;
     let ws = null;
+    let lastSnapshotId = null;
     let chart = null;
     let chartTimeData = [];
     let chartDownData = [];
@@ -341,6 +342,9 @@
       ws.onmessage = (event) => {
         const data = JSON.parse(event.data);
         if (data.type === 'DEVICE_UPDATE') {
+          if (data.snapshot_id && data.snapshot_id === lastSnapshotId) return;
+          lastSnapshotId = data.snapshot_id || null;
+
           devicesData = data.devices;
           document.getElementById('mode-badge').innerText = data.mode === 'demo' ? '演示模式 (Demo)' : '真实路由器采集 (Live)';
           if (data.timestamp) {
@@ -681,23 +685,50 @@
       };
 
       const errMsg = document.getElementById('config-error-msg');
+      const saveBtn = e.target.querySelector('button[type="submit"]');
       errMsg.classList.add('hidden');
+      
+      if (saveBtn) {
+        saveBtn.disabled = true;
+        saveBtn.textContent = '保存中...';
+      }
+      
       try {
         const response = await fetch(`${API_BASE}/api/config`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(payload)
         });
-        if (!response.ok) {
-          const errData = await response.json();
-          errMsg.innerText = `保存失败: ${errData.detail || '未知错误'}`;
+        
+        const result = await response.json().catch(() => ({}));
+        if (!response.ok || result.status !== 'success') {
+          throw new Error(result.detail || result.message || `保存失败 (HTTP ${response.status})`);
+        }
+
+        if (result.restart_required) {
+          errMsg.className = 'text-xs mt-2 text-amber-400 font-medium bg-amber-500/10 p-2 rounded';
+          errMsg.innerText = '配置已保存，数据库将在重启后生效';
           errMsg.classList.remove('hidden');
+          // Add a small delay then close
+          setTimeout(() => {
+            closeConfigModal();
+          }, 3000);
           return;
         }
+
         closeConfigModal();
+        if (result.collector_restarted) {
+          // just optional toast
+        }
       } catch (err) {
+        errMsg.className = 'text-xs mt-2 text-rose-400';
         errMsg.innerText = `请求失败: ${err.message}`;
         errMsg.classList.remove('hidden');
+      } finally {
+        if (saveBtn) {
+          saveBtn.disabled = false;
+          saveBtn.textContent = '保存';
+        }
       }
     }
 

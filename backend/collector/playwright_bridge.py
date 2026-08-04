@@ -3,24 +3,29 @@ from playwright.async_api import async_playwright
 import json
 import sys
 import time
+import time
 import os
 from datetime import datetime, timezone
+import uuid
 
 # Force stdout to flush
 sys.stdout.reconfigure(line_buffering=True)
 
 async def daemon(host, password, output_file):
+    bridge_process_id = uuid.uuid4().hex
+    sequence = 0
+
     print(f"Starting Playwright bridge daemon for {host}...", flush=True)
     while True:
         try:
             print("Launching Playwright...", flush=True)
             async with async_playwright() as p:
+                browser_session_id = uuid.uuid4().hex
                 browser = await p.chromium.launch(headless=True)
                 context = await browser.new_context(ignore_https_errors=True)
                 page = await context.new_page()
                 
                 data_cache = {"topology": None, "user_list": None}
-                sequence = 0
 
                 async def handle_response(response):
                     nonlocal sequence
@@ -39,13 +44,21 @@ async def daemon(host, password, output_file):
                                 if d.get("code") == 0:
                                     data_cache["user_list"] = d.get("data")
                                     sequence += 1
-                                    data_cache["sequence"] = sequence
-                                    data_cache["generated_at"] = datetime.now(timezone.utc).isoformat()
+                                    
+                                    snapshot = {
+                                        "schema_version": 1,
+                                        "bridge_process_id": bridge_process_id,
+                                        "browser_session_id": browser_session_id,
+                                        "sequence": sequence,
+                                        "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                                        "topology": data_cache.get("topology"),
+                                        "user_list": data_cache.get("user_list")
+                                    }
                                     
                                     # Atomic write
                                     temp_file = f"{output_file}.tmp"
                                     with open(temp_file, "w", encoding="utf-8") as f:
-                                        json.dump(data_cache, f)
+                                        json.dump(snapshot, f)
                                         f.flush()
                                         os.fsync(f.fileno())
                                     os.replace(temp_file, output_file)
