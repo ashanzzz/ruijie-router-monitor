@@ -40,8 +40,23 @@ class RuijieCollector:
             return
         logger.info("Starting Playwright bridge daemon...")
         bridge_script = os.path.join(os.path.dirname(__file__), "playwright_bridge.py")
-        subprocess.Popen([sys.executable, bridge_script, self.host, self.password, self.data_file])
+        env = os.environ.copy()
+        env["RUIJIE_PASS"] = self.password
+        self.daemon_process = subprocess.Popen([sys.executable, bridge_script, self.host, self.data_file], env=env)
         self.daemon_started = True
+
+    def restart(self, new_host: str, new_pass: str):
+        self.host = new_host
+        self.password = new_pass
+        if hasattr(self, 'daemon_process') and self.daemon_process:
+            logger.info("Terminating old Playwright daemon...")
+            self.daemon_process.terminate()
+            try:
+                self.daemon_process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                self.daemon_process.kill()
+        self.daemon_started = False
+        self._start_daemon()
 
     async def fetch_topology(self) -> Dict[str, Any]:
         """

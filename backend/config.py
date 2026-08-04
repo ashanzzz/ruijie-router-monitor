@@ -9,7 +9,7 @@ class Settings:
     # Router Credentials & Address
     RUIJIE_HOST: str = os.getenv("RUIJIE_HOST", "http://192.168.8.1")
     RUIJIE_USER: str = os.getenv("RUIJIE_USER", "admin")
-    RUIJIE_PASS: str = os.getenv("RUIJIE_PASS", "a123456789.")
+    RUIJIE_PASS: str = os.getenv("RUIJIE_PASS", "")
     
     # Mode: 'live' or 'demo'
     COLLECTOR_MODE: str = os.getenv("COLLECTOR_MODE", "live")

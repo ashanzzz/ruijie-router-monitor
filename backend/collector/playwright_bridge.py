@@ -101,5 +101,8 @@ async def daemon(host, password, output_file):
             await asyncio.sleep(5)
 
 if __name__ == "__main__":
-    if len(sys.argv) > 3:
-        asyncio.run(daemon(sys.argv[1], sys.argv[2], sys.argv[3]))
+    if len(sys.argv) > 2:
+        host = sys.argv[1]
+        output_file = sys.argv[2]
+        password = os.environ.get("RUIJIE_PASS", "")
+        asyncio.run(daemon(host, password, output_file))

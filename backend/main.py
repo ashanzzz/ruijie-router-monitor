@@ -395,13 +395,17 @@ def test_db(req: TestDbRequest):
 
 @app.post("/api/config")
 def update_config(req: SettingsUpdateRequest):
+    old_host = settings.RUIJIE_HOST
+    old_pass = settings.RUIJIE_PASS
+    
     settings.RUIJIE_HOST = req.ruijie_host
     settings.RUIJIE_USER = req.ruijie_user
     if req.ruijie_pass:
         settings.RUIJIE_PASS = req.ruijie_pass
     settings.COLLECTOR_MODE = req.collector_mode
     settings.POLL_INTERVAL = req.poll_interval
-    settings.TELEGRAM_BOT_TOKEN = req.telegram_bot_token
+    if req.telegram_bot_token and "***" not in req.telegram_bot_token:
+        settings.TELEGRAM_BOT_TOKEN = req.telegram_bot_token
     settings.TELEGRAM_CHAT_ID = req.telegram_chat_id
     settings.TELEGRAM_ENABLE = req.telegram_enable
     
@@ -412,13 +416,16 @@ def update_config(req: SettingsUpdateRequest):
     # Persistent Save
     settings.save()
     
-    ruijie_collector.host = req.ruijie_host
-    ruijie_collector.username = req.ruijie_user
-    ruijie_collector.mode = req.collector_mode
+    ruijie_collector.host = settings.RUIJIE_HOST
+    ruijie_collector.username = settings.RUIJIE_USER
+    ruijie_collector.mode = settings.COLLECTOR_MODE
     
-    telegram_notifier.bot_token = req.telegram_bot_token
-    telegram_notifier.chat_id = req.telegram_chat_id
-    telegram_notifier.enabled = req.telegram_enable
+    if old_host != settings.RUIJIE_HOST or old_pass != settings.RUIJIE_PASS:
+        ruijie_collector.restart(settings.RUIJIE_HOST, settings.RUIJIE_PASS)
+    
+    telegram_notifier.bot_token = settings.TELEGRAM_BOT_TOKEN
+    telegram_notifier.chat_id = settings.TELEGRAM_CHAT_ID
+    telegram_notifier.enabled = settings.TELEGRAM_ENABLE
     
     # Reload engine if DB URL changed
     if old_db_url != settings.DATABASE_URL:
