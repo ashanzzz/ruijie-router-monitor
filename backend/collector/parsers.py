@@ -152,18 +152,24 @@ def parse_clients(raw: Any, ap_map: dict[str, tuple[str, str]]) -> list[DeviceOb
             ).strip()
             or None
         )
-        rx_counter = integer(
-            item.get("down")
-            or item.get("flowDown")
-            or item.get("download_bytes")
-            or item.get("rx_bytes")
-        )
-        tx_counter = integer(
-            item.get("up")
-            or item.get("flowUp")
-            or item.get("upload_bytes")
-            or item.get("tx_bytes")
-        )
+        down_raw = item.get("down") or item.get("download_bytes") or item.get("rx_bytes")
+        up_raw = item.get("up") or item.get("upload_bytes") or item.get("tx_bytes")
+        flow_down_raw = item.get("flowDown")
+        flow_up_raw = item.get("flowUp")
+
+        if down_raw is not None and str(down_raw).strip() != "":
+            rx_counter = integer(down_raw)
+        elif flow_down_raw is not None and str(flow_down_raw).strip() != "":
+            rx_counter = integer(flow_down_raw) * 1024
+        else:
+            rx_counter = 0
+
+        if up_raw is not None and str(up_raw).strip() != "":
+            tx_counter = integer(up_raw)
+        elif flow_up_raw is not None and str(flow_up_raw).strip() != "":
+            tx_counter = integer(flow_up_raw) * 1024
+        else:
+            tx_counter = 0
         rx_rate = number(item.get("rx_rate") or item.get("download_rate"))
         tx_rate = number(item.get("tx_rate") or item.get("upload_rate"))
         result.append(
