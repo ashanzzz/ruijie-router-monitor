@@ -1,0 +1,11 @@
+services:
+  ruijie-router-monitor:
+    build: .
+    container_name: ruijie-router-monitor
+    restart: unless-stopped
+    init: true
+    shm_size: "512mb"
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data:/app/data
