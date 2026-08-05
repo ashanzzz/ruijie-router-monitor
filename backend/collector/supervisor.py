@@ -155,7 +155,9 @@ class RuijieCollectorSupervisor:
                 self.runtime.restart_required = False
                 await self._ensure_logged_in()
                 snapshot = await self.collect_once()
-                await self.on_snapshot(snapshot)
+                res = self.on_snapshot(snapshot)
+                if asyncio.iscoroutine(res) or hasattr(res, "__await__"):
+                    await res
                 
                 self.runtime.state = "ready"
                 self.runtime.active_revision = self.runtime.configured_revision
@@ -266,6 +268,10 @@ class RuijieCollectorSupervisor:
         request = response.request
         if "/api/cmd" not in response.url or request.method != "POST":
             return
+        import re
+        match = re.search(r"[?&]auth=([^&]+)", response.url)
+        if match:
+            self._auth_token = match.group(1)
         post_data = request.post_data or ""
         command = None
         for candidate in ("local_topology", "user_list"):
@@ -335,6 +341,11 @@ class RuijieCollectorSupervisor:
         headers = {}
         if template.content_type:
             headers["content-type"] = template.content_type
+        target_url = template.url
+        if getattr(self, "_auth_token", None) and "auth=" in target_url:
+            import re
+            target_url = re.sub(r"([?&]auth=)[^&]+", r"\g<1>" + self._auth_token, target_url)
+
         post_data = template.post_data
         if command == "user_list" and isinstance(post_data, str):
             import re
@@ -345,7 +356,7 @@ class RuijieCollectorSupervisor:
 
         async def fetch_one(raw_data: Any) -> Any:
             resp = await self._context.request.fetch(
-                template.url,
+                target_url,
                 method=template.method,
                 headers=headers,
                 data=raw_data,
@@ -353,12 +364,14 @@ class RuijieCollectorSupervisor:
                 fail_on_status_code=False,
             )
             if resp.status in {401, 403}:
+                self.runtime.authenticated = False
                 raise AuthenticationError("路由器会话已过期")
             if not resp.ok:
                 raise CollectorError(f"{command}接口返回HTTP {resp.status}")
             payload = await resp.json()
             if not isinstance(payload, dict) or payload.get("code") != 0:
-                raise CollectorError(f"{command}接口业务返回失败")
+                self.runtime.authenticated = False
+                raise AuthenticationError(f"{command}接口凭证已失效(code={payload.get('code') if isinstance(payload, dict) else 'err'})")
             return payload.get("data")
 
         data = await fetch_one(post_data)
@@ -428,6 +441,8 @@ class RuijieCollectorSupervisor:
             total = self._latest_clients.get("total") or self._latest_clients.get("totalCount") or self._latest_clients.get("count")
             if isinstance(total, (int, float)) and total > 0 and len(devices) < total:
                 complete = False
+        if len(devices) == 0:
+            complete = False
         return RouterSnapshot(
             snapshot_id=f"{self._session_id}:{self._sequence}",
             collected_at=collected_at,
