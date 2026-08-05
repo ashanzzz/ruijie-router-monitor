@@ -44,6 +44,8 @@ class Settings:
     db_password: str = ""
     db_sslmode: str = "disable"
     cookie_secure: bool = False
+    retention_days_normal: int = 30
+    retention_days_starred: int = 180
 
     @classmethod
     def load(cls) -> "Settings":
@@ -100,6 +102,8 @@ class Settings:
             db_password=value("DB_PASSWORD", ""),
             db_sslmode=value("DB_SSLMODE", "disable"),
             cookie_secure=_as_bool(value("COOKIE_SECURE", "false")),
+            retention_days_normal=int(value("RETENTION_DAYS_NORMAL", "30")),
+            retention_days_starred=int(value("RETENTION_DAYS_STARRED", "180")),
         )
 
         if parsed_legacy is not None:
@@ -165,6 +169,8 @@ class Settings:
             "DB_PASSWORD": self.db_password,
             "DB_SSLMODE": self.db_sslmode,
             "COOKIE_SECURE": str(self.cookie_secure).lower(),
+            "RETENTION_DAYS_NORMAL": str(self.retention_days_normal),
+            "RETENTION_DAYS_STARRED": str(self.retention_days_starred),
         }
         fd, temp_path = tempfile.mkstemp(
             prefix="config.env.", dir=self.data_dir, text=True

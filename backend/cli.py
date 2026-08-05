@@ -8,7 +8,7 @@ from pathlib import Path
 
 from sqlalchemy import MetaData, URL, create_engine, func, insert, select
 
-from backend.auth import init_control_db, reset_admin_password
+from backend.auth_utils import init_control_db, reset_admin_password
 from backend.config import settings
 from backend.db.models import Base
 from backend.db.runtime import create_database_engine, verify_candidate

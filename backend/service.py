@@ -56,10 +56,46 @@ def event(db, *, mac: str | None, node_id: str | None, name: str | None, ip: str
     return message
 
 
+import time
+_last_cleanup = 0.0
+
+def _cleanup_old_data_if_needed(db) -> None:
+    from backend.config import settings
+    from datetime import timezone
+    global _last_cleanup
+    now_ts = time.time()
+    if now_ts - _last_cleanup < 3600:
+        return
+    _last_cleanup = now_ts
+
+    from sqlalchemy import delete
+    now = datetime.now(timezone.utc)
+    cutoff_normal = now - timedelta(days=settings.retention_days_normal)
+    cutoff_starred = now - timedelta(days=settings.retention_days_starred)
+    
+    starred_macs = list(db.scalars(select(Device.mac).where(Device.is_starred.is_(True))).all())
+    
+    for model, time_col in [
+        (ClientTrafficSample, ClientTrafficSample.sampled_at),
+        (ConnectionHistory, ConnectionHistory.session_start),
+        (EventLog, EventLog.timestamp),
+    ]:
+        if starred_macs:
+            db.execute(delete(model).where(model.mac.notin_(starred_macs), time_col < cutoff_normal))
+            db.execute(delete(model).where(model.mac.in_(starred_macs), time_col < cutoff_starred))
+        else:
+            db.execute(delete(model).where(time_col < cutoff_normal))
+
+    db.execute(delete(RoamingSegment).where(
+        RoamingSegment.session_id.notin_(select(ConnectionHistory.id))
+    ))
+
+
 def process_snapshot(snapshot: RouterSnapshot) -> list[str]:
     notifications: list[str] = []
     with db_runtime.session() as db:
         with db.begin():
+            _cleanup_old_data_if_needed(db)
             if db.get(ProcessedSnapshot, snapshot.snapshot_id) is not None:
                 return []
 

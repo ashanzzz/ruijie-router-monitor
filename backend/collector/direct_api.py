@@ -96,12 +96,12 @@ class DirectApiCollector:
                 hostname=hostname,
                 ap_sn=ap_sn,
                 ap_name=ap_name,
+                parent_node_id=f"sn:{ap_sn}" if ap_sn else None,
                 ssid=ssid,
-                is_online=True,
-                rx_rate=round(rx_rate_kb, 1),
-                tx_rate=round(tx_rate_kb, 1),
-                total_rx_bytes=rx_bytes,
-                total_tx_bytes=tx_bytes,
+                rx_counter_bytes=int(rx_bytes),
+                tx_counter_bytes=int(tx_bytes),
+                rx_rate_kbps=round(rx_rate_kb, 1),
+                tx_rate_kbps=round(tx_rate_kb, 1),
                 usage_state=status_str
             ))
 
@@ -186,11 +186,10 @@ class DirectApiCollector:
             logger.info(f"UI Data fetched: topology length={len(ui_data.get('topology', {}))}, user_list length={len(ui_data.get('user_list', []))}")
             
             topo = ui_data.get("topology", {})
-            raw_topo_node = None
+            node_observations = []
             if topo and "topo" in topo:
-                raw_topo_node = topo["topo"]
                 # Use topology_parser for richer extraction
-                node_observations = parse_topology(raw_topo_node)
+                node_observations = parse_topology(topo["topo"])
                 self.ap_sn_map = build_ap_name_map(node_observations)
 
             raw_users = ui_data.get("user_list", [])
@@ -203,10 +202,9 @@ class DirectApiCollector:
                 snapshot_id=str(uuid.uuid4()),
                 collected_at=datetime.now(timezone.utc),
                 source="ui_fallback",
-                profile_id=self.profile.profile_id if self.profile else "unknown",
                 complete=True,
-                devices=devices,
-                raw_topology=topo if topo else None,
+                devices=tuple(devices),
+                nodes=tuple(node_observations)
             )
 
         except Exception as e:

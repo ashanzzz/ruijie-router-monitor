@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from sqlalchemy import URL, func, select
 from sqlalchemy.orm import Session
 
-from backend.auth import (
+from backend.auth_utils import (
     auth_status,
     authenticate_websocket,
     change_password,
@@ -253,6 +253,8 @@ class ConfigRequest(BaseModel):
     telegram_token: str | None = Field(default=None, max_length=256)
     telegram_chat_id: str = Field(default="", max_length=128)
     database: DatabaseRequest
+    retention_days_normal: int = Field(default=30, ge=1, le=3650)
+    retention_days_starred: int = Field(default=180, ge=1, le=3650)
 
     @field_validator("router_host")
     @classmethod
@@ -699,6 +701,8 @@ def get_config(_=Depends(require_admin)) -> dict[str, Any]:
             **settings.database_summary(),
             "password_configured": bool(settings.db_password),
         },
+        "retention_days_normal": settings.retention_days_normal,
+        "retention_days_starred": settings.retention_days_starred,
     }
 
 
@@ -792,6 +796,8 @@ async def update_config(
     if payload.telegram_token is not None:
         settings.telegram_token = payload.telegram_token
     settings.telegram_chat_id = payload.telegram_chat_id
+    settings.retention_days_normal = payload.retention_days_normal
+    settings.retention_days_starred = payload.retention_days_starred
 
     settings.database_type = payload.database.type
     if payload.database.type == "sqlite":
