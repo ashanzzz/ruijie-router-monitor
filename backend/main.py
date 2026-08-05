@@ -111,6 +111,7 @@ def serialize_clients(db: Session) -> list[dict[str, Any]]:
                 "last_seen": iso(item.last_seen),
                 "last_online_at": iso(item.last_online_at),
                 "last_offline_at": iso(item.last_offline_at),
+                "rssi": getattr(item, "rssi", None),
             }
         )
     return clients

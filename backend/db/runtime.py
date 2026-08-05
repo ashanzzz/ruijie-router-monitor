@@ -123,6 +123,7 @@ def apply_legacy_column_upgrades(engine: Engine) -> None:
             ("parent_node_id", "VARCHAR(160)"),
             ("rx_counter_bytes", "BIGINT DEFAULT 0"),
             ("tx_counter_bytes", "BIGINT DEFAULT 0"),
+            ("rssi", "VARCHAR(32)"),
         ],
         "connection_history": [
             ("start_rx_counter", "BIGINT DEFAULT 0"),

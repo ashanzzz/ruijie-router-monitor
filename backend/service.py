@@ -150,6 +150,7 @@ def process_snapshot(snapshot: RouterSnapshot) -> list[str]:
                 device.rx_counter_bytes = item.rx_counter_bytes
                 device.tx_counter_bytes = item.tx_counter_bytes
                 device.usage_state = item.usage_state
+                device.rssi = item.rssi
 
                 session = active_session(db, item.mac)
                 if session is None:

@@ -160,6 +160,9 @@ def parse_clients(raw: Any, ap_map: dict[str, tuple[str, str]]) -> list[DeviceOb
                 rx_rate_kbps=round(rx_rate, 1),
                 tx_rate_kbps=round(tx_rate, 1),
                 usage_state=traffic_state(rx_rate, tx_rate),
+                rssi=str(
+                    item.get("rssi") or item.get("signal") or item.get("wifi_signal") or item.get("rssi_val") or ""
+                ).strip() or None,
             )
         )
     return result

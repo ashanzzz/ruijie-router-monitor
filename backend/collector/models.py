@@ -19,6 +19,7 @@ class DeviceObservation:
     rx_rate_kbps: float
     tx_rate_kbps: float
     usage_state: str
+    rssi: str | None = None
 
 
 @dataclass(frozen=True)

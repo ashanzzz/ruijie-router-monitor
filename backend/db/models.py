@@ -36,6 +36,7 @@ class Device(Base):
     rx_counter_bytes: Mapped[int] = mapped_column(BigInteger, default=0)
     tx_counter_bytes: Mapped[int] = mapped_column(BigInteger, default=0)
     usage_state: Mapped[str] = mapped_column(String(64), default="空闲")
+    rssi: Mapped[str | None] = mapped_column(String(32))
     is_starred: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
 
 
