@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -828,13 +829,19 @@ async def update_config(
 
     return {
         "status": "success",
-        "message": "配置已保存到/app/data/config.env",
-        "database_verification": verification,
-        "configured_database": configured,
-        "active_database": old_active,
         "restart_required": restart_required,
+        "message": "Configuration saved",
         "collector_restarted": collector_restarted,
     }
+
+@app.post("/api/system/restart")
+async def restart_system(_=Depends(require_csrf)):
+    async def _do_restart():
+        await asyncio.sleep(1)
+        os._exit(0)
+    asyncio.create_task(_do_restart())
+    return {"status": "success", "message": "Service is restarting"}
+
 
 
 # ---------- WebSocket ----------
