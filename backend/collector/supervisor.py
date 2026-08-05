@@ -175,7 +175,8 @@ class RuijieCollectorSupervisor:
             'input[name="username"], input[name="user"], input[type="text"]'
         ).first
         if await user_input.count() and await user_input.is_visible():
-            await user_input.fill(self.username)
+            if self.username:
+                await user_input.fill(self.username)
             auth_mode = "username_password"
         else:
             auth_mode = "password_only"
