@@ -6,6 +6,7 @@ import time
 from sqlalchemy import and_, delete, or_, select
 
 from backend.collector.models import RouterSnapshot
+from backend.collector.parsers import traffic_state
 from backend.config import settings
 from backend.time_utils import utcnow
 from backend.db import (
@@ -157,6 +158,10 @@ def process_snapshot(snapshot: RouterSnapshot) -> list[str]:
                         is_online=True,
                     )
                     db.add(device)
+                old_seen = device.last_seen
+                old_rx = device.rx_counter_bytes or 0
+                old_tx = device.tx_counter_bytes or 0
+
                 device.ip = item.ip
                 device.hostname = item.hostname
                 device.ap_sn = item.ap_sn
@@ -166,11 +171,22 @@ def process_snapshot(snapshot: RouterSnapshot) -> list[str]:
                 device.rssi = item.rssi
                 device.is_online = True
                 device.last_seen = snapshot.collected_at
-                device.rx_rate = item.rx_rate_kbps
-                device.tx_rate = item.tx_rate_kbps
+
+                rx_rate_kbps = item.rx_rate_kbps
+                tx_rate_kbps = item.tx_rate_kbps
+                if (rx_rate_kbps == 0 and tx_rate_kbps == 0) and old_seen and snapshot.collected_at > old_seen:
+                    dt = (snapshot.collected_at - old_seen).total_seconds()
+                    if 0.5 <= dt <= 300:
+                        rx_delta = counter_delta(item.rx_counter_bytes, old_rx)
+                        tx_delta = counter_delta(item.tx_counter_bytes, old_tx)
+                        rx_rate_kbps = round((rx_delta / dt) / 1024.0, 1)
+                        tx_rate_kbps = round((tx_delta / dt) / 1024.0, 1)
+
+                device.rx_rate = rx_rate_kbps
+                device.tx_rate = tx_rate_kbps
                 device.rx_counter_bytes = item.rx_counter_bytes
                 device.tx_counter_bytes = item.tx_counter_bytes
-                device.usage_state = item.usage_state
+                device.usage_state = traffic_state(rx_rate_kbps, tx_rate_kbps)
 
                 session = active_session(db, item.mac)
                 if session is None:
@@ -289,8 +305,8 @@ def process_snapshot(snapshot: RouterSnapshot) -> list[str]:
                         ClientTrafficSample(
                             mac=item.mac,
                             sampled_at=snapshot.collected_at,
-                            rx_rate_kbps=item.rx_rate_kbps,
-                            tx_rate_kbps=item.tx_rate_kbps,
+                            rx_rate_kbps=rx_rate_kbps,
+                            tx_rate_kbps=tx_rate_kbps,
                             rx_counter_bytes=item.rx_counter_bytes,
                             tx_counter_bytes=item.tx_counter_bytes,
                             parent_node_id=item.parent_node_id,
