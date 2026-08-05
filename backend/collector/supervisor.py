@@ -15,6 +15,7 @@ from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 from backend.collector.models import CollectorStatus, RouterSnapshot
 from backend.collector.parsers import parse_clients, parse_topology
 from backend.config import settings
+from backend.time_utils import utcnow
 
 logger = logging.getLogger("ruijie_collector")
 
@@ -51,7 +52,6 @@ class RuijieCollectorSupervisor:
     ):
         self.on_snapshot = on_snapshot
         self.host = (host or settings.router_host).rstrip("/")
-        self.username = username if username is not None else settings.router_user
         self.password = password if password is not None else settings.router_password
         self.poll_interval = poll_interval or settings.poll_interval
         self.status = CollectorStatus()
@@ -168,18 +168,11 @@ class RuijieCollectorSupervisor:
         )
         self._page = await self._context.new_page()
         self._page.on("response", self._handle_response)
-        login_url = f"{self.host}/cgi-bin/luci/"
+        login_url = f"{self.host}/"
         await self._page.goto(login_url, wait_until="domcontentloaded", timeout=15000)
 
-        user_input = self._page.locator(
-            'input[name="username"], input[name="user"], input[type="text"]'
-        ).first
-        if await user_input.count() and await user_input.is_visible():
-            if self.username:
-                await user_input.fill(self.username)
-            auth_mode = "username_password"
-        else:
-            auth_mode = "password_only"
+        # Password-only firmware
+        auth_mode = "password_only"
 
         password = self._page.locator('input[type="password"]').first
         await password.wait_for(state="visible", timeout=7000)
@@ -189,7 +182,11 @@ class RuijieCollectorSupervisor:
             async with self._page.expect_response(
                 lambda response: "/api/auth" in response.url, timeout=10000
             ) as response_info:
-                await password.press("Enter")
+                login_btn = self._page.locator("text='登录'").first
+                if await login_btn.count() and await login_btn.is_visible():
+                    await login_btn.click()
+                else:
+                    await password.press("Enter")
             auth_response = await response_info.value
         except PlaywrightTimeoutError:
             # The submit already happened inside expect_response; some firmware does
@@ -206,9 +203,18 @@ class RuijieCollectorSupervisor:
             except json.JSONDecodeError:
                 pass
 
+        await self._page.wait_for_timeout(3000)
+        try:
+            err_text = await self._page.locator("#errorTimes").text_content(timeout=1000)
+            if err_text:
+                print(f"Login error text from page: {err_text}")
+        except Exception:
+            err_text = "N/A"
+                
         if await password.is_visible():
-            raise AuthenticationError("登录后密码框仍可见，认证未成功")
-        self.status.last_login_at = datetime.utcnow()
+            raise AuthenticationError(f"登录后密码框仍可见，认证未成功. error={err_text}, url={self._page.url}")
+        
+        self.status.last_login_at = utcnow()
         self.status.profile_id = f"ruijie-eweb-{auth_mode}"
         self.status.state = "discovering"
 
@@ -263,7 +269,10 @@ class RuijieCollectorSupervisor:
                 locator = self._page.get_by_text(label, exact=True).first
                 if await locator.count() and await locator.is_visible():
                     try:
-                        await locator.click(timeout=3000)
+                        # Dismiss any blocking dialogs
+                        await self._page.keyboard.press("Escape")
+                        await self._page.wait_for_timeout(500)
+                        await locator.click(timeout=3000, force=True)
                         clicked = True
                         break
                     except Exception:
@@ -326,7 +335,7 @@ class RuijieCollectorSupervisor:
         nodes, ap_map = parse_topology(self._latest_topology)
         devices = parse_clients(self._latest_clients, ap_map)
         self._sequence += 1
-        collected_at = datetime.utcnow()
+        collected_at = utcnow()
         return RouterSnapshot(
             snapshot_id=f"{self._session_id}:{self._sequence}",
             collected_at=collected_at,

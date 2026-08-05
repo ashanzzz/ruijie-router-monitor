@@ -1,8 +1,32 @@
+# Python
 __pycache__/
 *.py[cod]
 .venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Runtime and secrets
 data/
+backend/data/
 *.db
+*.db-wal
+*.db-shm
 config.env
 .env
-.pytest_cache/
+*.log
+
+# Build artifacts
+*.zip
+*.tar.gz
+dist/
+build/
+
+# Editors / OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

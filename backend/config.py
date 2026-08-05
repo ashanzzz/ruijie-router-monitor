@@ -28,8 +28,7 @@ class Settings:
     data_dir: Path
     config_file: Path
     app_name: str = "Ruijie Router Monitor"
-    router_host: str = "http://192.168.8.1"
-    router_user: str = "admin"
+    router_host: str = "http://192.168.1.1"
     router_password: str = ""
     poll_interval: int = 10
     telegram_token: str = ""
@@ -46,6 +45,7 @@ class Settings:
     cookie_secure: bool = False
     retention_days_normal: int = 30
     retention_days_starred: int = 180
+    self_restart_enabled: bool = True
 
     @classmethod
     def load(cls) -> "Settings":
@@ -87,7 +87,6 @@ class Settings:
             data_dir=data_dir,
             config_file=config_file,
             router_host=value("RUIJIE_HOST", "http://192.168.8.1").rstrip("/"),
-            router_user=value("RUIJIE_USER", "admin"),
             router_password=value("RUIJIE_PASS", ""),
             poll_interval=max(3, min(300, int(value("POLL_INTERVAL", "10")))),
             telegram_token=value("TELEGRAM_BOT_TOKEN", ""),
@@ -102,8 +101,9 @@ class Settings:
             db_password=value("DB_PASSWORD", ""),
             db_sslmode=value("DB_SSLMODE", "disable"),
             cookie_secure=_as_bool(value("COOKIE_SECURE", "false")),
-            retention_days_normal=int(value("RETENTION_DAYS_NORMAL", "30")),
-            retention_days_starred=int(value("RETENTION_DAYS_STARRED", "180")),
+            retention_days_normal=max(1, min(3650, int(value("RETENTION_DAYS_NORMAL", "30")))),
+            retention_days_starred=max(1, min(3650, int(value("RETENTION_DAYS_STARRED", "180")))),
+            self_restart_enabled=_as_bool(value("ALLOW_SELF_RESTART", "true"), True),
         )
 
         if parsed_legacy is not None:
@@ -154,7 +154,6 @@ class Settings:
     def save(self) -> None:
         values = {
             "RUIJIE_HOST": self.router_host,
-            "RUIJIE_USER": self.router_user,
             "RUIJIE_PASS": self.router_password,
             "POLL_INTERVAL": self.poll_interval,
             "TELEGRAM_BOT_TOKEN": self.telegram_token,
@@ -169,8 +168,9 @@ class Settings:
             "DB_PASSWORD": self.db_password,
             "DB_SSLMODE": self.db_sslmode,
             "COOKIE_SECURE": str(self.cookie_secure).lower(),
-            "RETENTION_DAYS_NORMAL": str(self.retention_days_normal),
-            "RETENTION_DAYS_STARRED": str(self.retention_days_starred),
+            "RETENTION_DAYS_NORMAL": self.retention_days_normal,
+            "RETENTION_DAYS_STARRED": self.retention_days_starred,
+            "ALLOW_SELF_RESTART": str(self.self_restart_enabled).lower(),
         }
         fd, temp_path = tempfile.mkstemp(
             prefix="config.env.", dir=self.data_dir, text=True

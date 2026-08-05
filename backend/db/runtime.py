@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass, field
 from datetime import datetime
 from threading import RLock
@@ -11,6 +12,7 @@ from sqlalchemy import Engine, URL, create_engine, inspect, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from backend.config import Settings, settings
+from backend.time_utils import utcnow
 from backend.db.models import Base
 
 logger = logging.getLogger("database")
@@ -37,6 +39,8 @@ class DatabaseRuntime:
                 connection.execute(text("SELECT 1"))
             Base.metadata.create_all(candidate)
             apply_legacy_column_upgrades(candidate)
+            if candidate_url.drivername.startswith("sqlite") and candidate_url.database:
+                os.chmod(candidate_url.database, 0o600)
         except Exception as exc:
             candidate.dispose()
             self.state = "connection_failed"
@@ -55,7 +59,7 @@ class DatabaseRuntime:
             )
             self.active_url = candidate_url
             self.state = "ready"
-            self.last_connected_at = datetime.utcnow()
+            self.last_connected_at = utcnow()
             self.last_error = None
 
     def session(self) -> Session:
@@ -78,6 +82,7 @@ class DatabaseRuntime:
             "port": url.port or 5432,
             "database": url.database,
             "user": url.username,
+            "sslmode": str(url.query.get("sslmode", "disable")),
         }
 
     def dispose(self) -> None:
@@ -119,22 +124,16 @@ def apply_legacy_column_upgrades(engine: Engine) -> None:
     inspector = inspect(engine)
     tables = set(inspector.get_table_names())
     additions: dict[str, list[tuple[str, str]]] = {
-        "devices": [
+        "network_clients": [
             ("parent_node_id", "VARCHAR(160)"),
-            ("rx_counter_bytes", "BIGINT DEFAULT 0"),
-            ("tx_counter_bytes", "BIGINT DEFAULT 0"),
-            ("rssi", "VARCHAR(32)"),
+            ("is_starred", "BOOLEAN DEFAULT false"),
+            ("rssi", "INTEGER"),
         ],
-        "connection_history": [
-            ("start_rx_counter", "BIGINT DEFAULT 0"),
-            ("start_tx_counter", "BIGINT DEFAULT 0"),
-            ("last_rx_counter", "BIGINT DEFAULT 0"),
-            ("last_tx_counter", "BIGINT DEFAULT 0"),
-            ("session_rx_bytes", "BIGINT DEFAULT 0"),
-            ("session_tx_bytes", "BIGINT DEFAULT 0"),
-            ("initial_parent_node_id", "VARCHAR(160)"),
-            ("last_parent_node_id", "VARCHAR(160)"),
+        "network_nodes": [
+            ("serial_number", "VARCHAR(160)"),
+            ("alias", "VARCHAR(255)")
         ],
+        "client_traffic_samples": [("rssi", "INTEGER")],
         "event_logs": [("node_id", "VARCHAR(160)")],
     }
     with engine.begin() as connection:
@@ -144,9 +143,12 @@ def apply_legacy_column_upgrades(engine: Engine) -> None:
             existing = {item["name"] for item in inspector.get_columns(table)}
             for name, sql_type in columns:
                 if name not in existing:
-                    connection.execute(
-                        text(f'ALTER TABLE "{table}" ADD COLUMN "{name}" {sql_type}')
-                    )
+                    try:
+                        connection.execute(
+                            text(f'ALTER TABLE "{table}" ADD COLUMN "{name}" {sql_type}')
+                        )
+                    except Exception:
+                        pass
 
 
 def verify_candidate(url: URL) -> dict[str, Any]:
@@ -166,16 +168,29 @@ def verify_candidate(url: URL) -> dict[str, Any]:
                 connection.execute(
                     text("INSERT INTO ruijie_monitor_probe VALUES (1, 'ok')")
                 )
-                assert connection.execute(
+                probe_value = connection.execute(
                     text("SELECT value FROM ruijie_monitor_probe WHERE id=1")
-                ).scalar_one() == "ok"
-                return {
-                    "database": row[0],
-                    "user": row[1],
-                    "read_write": True,
-                }
-            connection.execute(text("SELECT 1"))
-            return {"read_write": True}
+                ).scalar_one()
+                if probe_value != "ok":
+                    raise RuntimeError("Data integrity check failed")
+                return {"database": row[0], "user": row[1]}
+            else:
+                row = connection.execute(text("PRAGMA compile_options")).all()
+                connection.execute(
+                    text(
+                        "CREATE TEMP TABLE ruijie_monitor_probe "
+                        "(id INTEGER PRIMARY KEY, value TEXT NOT NULL)"
+                    )
+                )
+                connection.execute(
+                    text("INSERT INTO ruijie_monitor_probe VALUES (1, 'ok')")
+                )
+                probe_value = connection.execute(
+                    text("SELECT value FROM ruijie_monitor_probe WHERE id=1")
+                ).scalar_one()
+                if probe_value != "ok":
+                    raise RuntimeError("Data integrity check failed")
+                return {"sqlite_version": row[0][0] if row else "unknown"}
     finally:
         engine.dispose()
 

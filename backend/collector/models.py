@@ -14,12 +14,12 @@ class DeviceObservation:
     ap_name: str | None
     parent_node_id: str | None
     ssid: str | None
+    rssi: int | None
     rx_counter_bytes: int
     tx_counter_bytes: int
     rx_rate_kbps: float
     tx_rate_kbps: float
     usage_state: str
-    rssi: str | None = None
 
 
 @dataclass(frozen=True)

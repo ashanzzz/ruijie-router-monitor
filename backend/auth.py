@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import secrets
 import threading
 from collections import defaultdict, deque
@@ -15,6 +16,7 @@ from sqlalchemy import DateTime, Integer, String, create_engine, delete, select
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
 from backend.config import settings
+from backend.time_utils import utcnow
 
 
 class ControlBase(DeclarativeBase):
@@ -55,6 +57,8 @@ login_lock = threading.Lock()
 
 def init_control_db() -> None:
     ControlBase.metadata.create_all(control_engine)
+    if control_path.exists():
+        os.chmod(control_path, 0o600)
 
 
 def validate_password(value: str) -> None:
@@ -83,7 +87,7 @@ def set_session_cookie(response: Response, raw_token: str) -> None:
 def create_admin_session(db: Session, version: int) -> tuple[str, str]:
     raw_token = secrets.token_urlsafe(32)
     csrf_token = secrets.token_urlsafe(24)
-    now = datetime.utcnow()
+    now = utcnow()
     db.add(
         AdminSession(
             token_hash=hash_token(raw_token),
@@ -108,7 +112,7 @@ def lookup_session(raw_token: str | None) -> AdminSession | None:
     with ControlSession.begin() as db:
         item = db.get(AdminSession, hash_token(raw_token))
         admin = db.get(AdminCredential, 1)
-        now = datetime.utcnow()
+        now = utcnow()
         if (
             item is None
             or admin is None
@@ -138,7 +142,7 @@ def setup_admin(password: str, confirm: str, response: Response) -> dict:
     validate_password(password)
     if password != confirm:
         raise HTTPException(422, "两次密码不一致")
-    now = datetime.utcnow()
+    now = utcnow()
     with ControlSession.begin() as db:
         if db.get(AdminCredential, 1) is not None:
             raise HTTPException(409, "管理员密码已经设置")
@@ -156,7 +160,7 @@ def setup_admin(password: str, confirm: str, response: Response) -> dict:
 
 
 def _enforce_rate_limit(ip: str) -> None:
-    now = datetime.utcnow()
+    now = utcnow()
     cutoff = now - timedelta(minutes=10)
     with login_lock:
         queue = login_failures[ip]
@@ -178,7 +182,7 @@ def login_admin(password: str, response: Response, ip: str) -> dict:
             valid = False
         if not valid:
             with login_lock:
-                login_failures[ip].append(datetime.utcnow())
+                login_failures[ip].append(utcnow())
             raise HTTPException(401, "管理员密码错误")
         if password_hasher.check_needs_rehash(admin.password_hash):
             admin.password_hash = password_hasher.hash(password)
@@ -231,7 +235,7 @@ def change_password(current: str, new: str, confirm: str, response: Response) ->
             raise HTTPException(401, "当前管理员密码错误")
         admin.password_hash = password_hasher.hash(new)
         admin.password_version += 1
-        admin.updated_at = datetime.utcnow()
+        admin.updated_at = utcnow()
         db.execute(delete(AdminSession))
         raw, csrf = create_admin_session(db, admin.password_version)
     set_session_cookie(response, raw)
@@ -240,7 +244,7 @@ def change_password(current: str, new: str, confirm: str, response: Response) ->
 
 def reset_admin_password(new_password: str) -> None:
     validate_password(new_password)
-    now = datetime.utcnow()
+    now = utcnow()
     with ControlSession.begin() as db:
         admin = db.get(AdminCredential, 1)
         if admin is None:

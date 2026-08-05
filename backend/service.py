@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
-from typing import Iterable
+import time
 
-from sqlalchemy import select
+from sqlalchemy import and_, delete, or_, select
 
-from backend.collector.models import DeviceObservation, RouterSnapshot
+from backend.collector.models import RouterSnapshot
+from backend.config import settings
+from backend.time_utils import utcnow
 from backend.db import (
     ClientTrafficSample,
     ConnectionHistory,
@@ -56,46 +58,64 @@ def event(db, *, mac: str | None, node_id: str | None, name: str | None, ip: str
     return message
 
 
-import time
-_last_cleanup = 0.0
+_CLEANUP_INTERVAL_SECONDS = 6 * 60 * 60
+_last_cleanup_monotonic = 0.0
 
-def _cleanup_old_data_if_needed(db) -> None:
-    from backend.config import settings
-    from datetime import timezone
-    global _last_cleanup
-    now_ts = time.time()
-    if now_ts - _last_cleanup < 3600:
-        return
-    _last_cleanup = now_ts
 
-    from sqlalchemy import delete
-    now = datetime.now(timezone.utc)
-    cutoff_normal = now - timedelta(days=settings.retention_days_normal)
-    cutoff_starred = now - timedelta(days=settings.retention_days_starred)
-    
-    starred_macs = list(db.scalars(select(Device.mac).where(Device.is_starred.is_(True))).all())
-    
-    for model, time_col in [
-        (ClientTrafficSample, ClientTrafficSample.sampled_at),
-        (ConnectionHistory, ConnectionHistory.session_start),
-        (EventLog, EventLog.timestamp),
-    ]:
-        if starred_macs:
-            db.execute(delete(model).where(model.mac.notin_(starred_macs), time_col < cutoff_normal))
-            db.execute(delete(model).where(model.mac.in_(starred_macs), time_col < cutoff_starred))
-        else:
-            db.execute(delete(model).where(time_col < cutoff_normal))
+def cleanup_expired_history(db, now: datetime) -> None:
+    """Delete time-series/history rows while retaining device identities and stars."""
+    normal_cutoff = now - timedelta(days=settings.retention_days_normal)
+    starred_cutoff = now - timedelta(days=settings.retention_days_starred)
+    starred_macs = select(Device.mac).where(Device.is_starred.is_(True))
 
-    db.execute(delete(RoamingSegment).where(
-        RoamingSegment.session_id.notin_(select(ConnectionHistory.id))
-    ))
+    traffic_expired = or_(
+        and_(
+            ClientTrafficSample.mac.in_(starred_macs),
+            ClientTrafficSample.sampled_at < starred_cutoff,
+        ),
+        and_(
+            ClientTrafficSample.mac.not_in(starred_macs),
+            ClientTrafficSample.sampled_at < normal_cutoff,
+        ),
+    )
+    db.execute(delete(ClientTrafficSample).where(traffic_expired))
+
+    events_expired = or_(
+        and_(EventLog.mac.in_(starred_macs), EventLog.created_at < starred_cutoff),
+        and_(
+            or_(EventLog.mac.is_(None), EventLog.mac.not_in(starred_macs)),
+            EventLog.created_at < normal_cutoff,
+        ),
+    )
+    db.execute(delete(EventLog).where(events_expired))
+
+    old_session_ids = select(ConnectionHistory.id).where(
+        ConnectionHistory.session_end.is_not(None),
+        or_(
+            and_(
+                ConnectionHistory.mac.in_(starred_macs),
+                ConnectionHistory.session_end < starred_cutoff,
+            ),
+            and_(
+                ConnectionHistory.mac.not_in(starred_macs),
+                ConnectionHistory.session_end < normal_cutoff,
+            ),
+        ),
+    )
+    db.execute(delete(RoamingSegment).where(RoamingSegment.session_id.in_(old_session_ids)))
+    db.execute(delete(ConnectionHistory).where(ConnectionHistory.id.in_(old_session_ids)))
+    db.execute(
+        delete(ProcessedSnapshot).where(ProcessedSnapshot.collected_at < normal_cutoff)
+    )
 
 
 def process_snapshot(snapshot: RouterSnapshot) -> list[str]:
+    global _last_cleanup_monotonic
     notifications: list[str] = []
+    now_monotonic = time.monotonic()
+    should_cleanup = now_monotonic - _last_cleanup_monotonic >= _CLEANUP_INTERVAL_SECONDS
     with db_runtime.session() as db:
         with db.begin():
-            _cleanup_old_data_if_needed(db)
             if db.get(ProcessedSnapshot, snapshot.snapshot_id) is not None:
                 return []
 
@@ -143,6 +163,7 @@ def process_snapshot(snapshot: RouterSnapshot) -> list[str]:
                 device.ap_name = item.ap_name
                 device.parent_node_id = item.parent_node_id
                 device.ssid = item.ssid
+                device.rssi = item.rssi
                 device.is_online = True
                 device.last_seen = snapshot.collected_at
                 device.rx_rate = item.rx_rate_kbps
@@ -150,7 +171,6 @@ def process_snapshot(snapshot: RouterSnapshot) -> list[str]:
                 device.rx_counter_bytes = item.rx_counter_bytes
                 device.tx_counter_bytes = item.tx_counter_bytes
                 device.usage_state = item.usage_state
-                device.rssi = item.rssi
 
                 session = active_session(db, item.mac)
                 if session is None:
@@ -274,6 +294,7 @@ def process_snapshot(snapshot: RouterSnapshot) -> list[str]:
                             rx_counter_bytes=item.rx_counter_bytes,
                             tx_counter_bytes=item.tx_counter_bytes,
                             parent_node_id=item.parent_node_id,
+                            rssi=item.rssi,
                         )
                     )
 
@@ -313,6 +334,9 @@ def process_snapshot(snapshot: RouterSnapshot) -> list[str]:
                         )
                     )
 
+            if should_cleanup:
+                cleanup_expired_history(db, snapshot.collected_at)
+
             db.add(
                 ProcessedSnapshot(
                     snapshot_id=snapshot.snapshot_id,
@@ -323,6 +347,8 @@ def process_snapshot(snapshot: RouterSnapshot) -> list[str]:
                 )
             )
 
-    db_runtime.last_successful_write_at = datetime.utcnow()
+    if should_cleanup:
+        _last_cleanup_monotonic = now_monotonic
+    db_runtime.last_successful_write_at = utcnow()
     db_runtime.last_write_snapshot_id = snapshot.snapshot_id
     return notifications

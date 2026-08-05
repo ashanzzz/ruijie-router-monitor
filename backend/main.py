@@ -14,7 +14,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from sqlalchemy import URL, func, select
 from sqlalchemy.orm import Session
 
-from backend.auth_utils import (
+from backend.auth import (
     auth_status,
     authenticate_websocket,
     change_password,
@@ -41,6 +41,7 @@ from backend.db import (
 from backend.db.runtime import verify_candidate
 from backend.notifier import send_telegram
 from backend.service import process_snapshot
+from backend.time_utils import utcnow
 
 logging.basicConfig(
     level=logging.INFO,
@@ -102,6 +103,7 @@ def serialize_clients(db: Session) -> list[dict[str, Any]]:
                     else item.ap_name
                 ),
                 "ssid": item.ssid,
+                "rssi": item.rssi,
                 "is_online": bool(item.is_online),
                 "is_starred": bool(item.is_starred),
                 "rx_rate": item.rx_rate or 0,
@@ -111,7 +113,6 @@ def serialize_clients(db: Session) -> list[dict[str, Any]]:
                 "last_seen": iso(item.last_seen),
                 "last_online_at": iso(item.last_online_at),
                 "last_offline_at": iso(item.last_offline_at),
-                "rssi": getattr(item, "rssi", None),
             }
         )
     return clients
@@ -198,7 +199,7 @@ async def lifespan(app: FastAPI):
         db_runtime.dispose()
 
 
-app = FastAPI(title=settings.app_name, version="2.0.0", lifespan=lifespan)
+app = FastAPI(title=settings.app_name, version="2.1.0", lifespan=lifespan)
 
 
 # ---------- Request models ----------
@@ -248,15 +249,14 @@ class DatabaseRequest(BaseModel):
 
 class ConfigRequest(BaseModel):
     router_host: str = Field(min_length=4, max_length=255)
-    router_user: str = Field(default="admin", max_length=128)
     router_password: str | None = Field(default=None, max_length=512)
     poll_interval: int = Field(default=10, ge=3, le=300)
     telegram_enabled: bool = False
     telegram_token: str | None = Field(default=None, max_length=256)
     telegram_chat_id: str = Field(default="", max_length=128)
-    database: DatabaseRequest
     retention_days_normal: int = Field(default=30, ge=1, le=3650)
     retention_days_starred: int = Field(default=180, ge=1, le=3650)
+    database: DatabaseRequest
 
     @field_validator("router_host")
     @classmethod
@@ -269,7 +269,6 @@ class ConfigRequest(BaseModel):
 
 class RouterDiscoverRequest(BaseModel):
     host: str = Field(min_length=4, max_length=255)
-    username: str = Field(default="admin", max_length=128)
     password: str | None = Field(default=None, max_length=512)
 
 
@@ -341,8 +340,8 @@ def bootstrap(_=Depends(require_admin)) -> dict[str, Any]:
         "database": database_status_payload(),
         "clients": clients,
         "network_nodes": nodes,
-        "server_time": iso(datetime.utcnow()),
         "router_host": settings.router_host,
+        "server_time": iso(utcnow()),
     }
 
 
@@ -485,7 +484,7 @@ def client_traffic(
     _=Depends(require_admin),
 ) -> dict:
     duration = {"2h": timedelta(hours=2), "24h": timedelta(days=1), "7d": timedelta(days=7), "30d": timedelta(days=30)}[range]
-    since = datetime.utcnow() - duration
+    since = utcnow() - duration
     rows = list(
         db.scalars(
             select(ClientTrafficSample)
@@ -504,6 +503,7 @@ def client_traffic(
                 "rx_rate_kbps": item.rx_rate_kbps,
                 "tx_rate_kbps": item.tx_rate_kbps,
                 "parent_node_id": item.parent_node_id,
+                "rssi": item.rssi,
             }
             for item in rows
         ],
@@ -561,7 +561,7 @@ def alias_client(
             db.add(item)
         else:
             item.alias = value
-            item.updated_at = datetime.utcnow()
+            item.updated_at = utcnow()
     elif item is not None:
         db.delete(item)
     db.commit()
@@ -694,18 +694,18 @@ def resolve_database_request(payload: DatabaseRequest) -> tuple[URL, str]:
 def get_config(_=Depends(require_admin)) -> dict[str, Any]:
     return {
         "router_host": settings.router_host,
-        "router_user": settings.router_user,
         "router_password_configured": bool(settings.router_password),
         "poll_interval": settings.poll_interval,
         "telegram_enabled": settings.telegram_enabled,
         "telegram_token_configured": bool(settings.telegram_token),
         "telegram_chat_id": settings.telegram_chat_id,
+        "retention_days_normal": settings.retention_days_normal,
+        "retention_days_starred": settings.retention_days_starred,
+        "database_runtime": database_status_payload(),
         "database": {
             **settings.database_summary(),
             "password_configured": bool(settings.db_password),
         },
-        "retention_days_normal": settings.retention_days_normal,
-        "retention_days_starred": settings.retention_days_starred,
     }
 
 
@@ -731,7 +731,6 @@ async def discover_router(
     password = payload.password
     same_target = (
         payload.host.rstrip("/") == settings.router_host.rstrip("/")
-        and payload.username == settings.router_user
     )
     if not password and same_target:
         password = settings.router_password
@@ -744,7 +743,6 @@ async def discover_router(
     temporary = RuijieCollectorSupervisor(
         discard,
         host=payload.host,
-        username=payload.username,
         password=password,
         poll_interval=settings.poll_interval,
     )
@@ -782,16 +780,13 @@ async def update_config(
     except Exception as exc:
         raise HTTPException(400, "数据库连接或读写权限验证失败，配置未保存") from exc
 
-    old_router = (
-        settings.router_host,
-        settings.router_user,
-        settings.router_password,
-        settings.poll_interval,
-    )
-    old_active = db_runtime.summary()
+    needs_restart = False
+    if url != settings.database_url():
+        needs_restart = True
+    elif database_password is not None and database_password != settings.db_password:
+        needs_restart = True
 
     settings.router_host = payload.router_host.rstrip("/")
-    settings.router_user = payload.router_user
     if payload.router_password is not None:
         settings.router_password = payload.router_password
     settings.poll_interval = payload.poll_interval
@@ -811,39 +806,80 @@ async def update_config(
         settings.db_host = payload.database.host or ""
         settings.db_port = payload.database.port or 5432
         settings.db_name = payload.database.database or ""
-        settings.db_user = payload.database.username or ""
-        settings.db_password = database_password
-        settings.db_sslmode = payload.database.sslmode
+        settings.db_user = payload.database.user or ""
+        if database_password is not None:
+            settings.db_password = database_password
+        settings.db_sslmode = payload.database.sslmode or "disable"
+
     settings.save()
+    return {"status": "success", "restart_required": needs_restart}
 
-    configured = settings.database_summary()
-    restart_required = configured != old_active
-    router_now = (
-        settings.router_host,
-        settings.router_user,
-        settings.router_password,
-        settings.poll_interval,
-    )
-    collector_restarted = False
-    if collector and router_now != old_router and db_runtime.state == "ready":
-        await collector.reconfigure(*router_now)
-        collector_restarted = True
 
+@app.patch("/api/config")
+async def patch_config(
+    payload: dict[str, Any],
+    _=Depends(require_csrf),
+) -> dict[str, Any]:
+    needs_restart = False
+    
+    if "database" in payload:
+        db_payload = payload.pop("database")
+        db_req = DatabaseRequest(**db_payload)
+        new_db_url, new_db_password = resolve_database_request(db_req)
+        if new_db_url != settings.database_url():
+            needs_restart = True
+        elif new_db_password is not None and new_db_password != settings.db_password:
+            needs_restart = True
+            
+        settings.database_type = db_req.type
+        if db_req.type == "sqlite":
+            settings.sqlite_filename = validate_sqlite_filename(db_req.filename or "monitor.db")
+        else:
+            settings.db_host = db_req.host or ""
+            settings.db_port = db_req.port or 5432
+            settings.db_name = db_req.database or ""
+            settings.db_user = db_req.user or ""
+            if new_db_password is not None:
+                settings.db_password = new_db_password
+            settings.db_sslmode = db_req.sslmode or "disable"
+
+    if "router_host" in payload:
+        settings.router_host = payload["router_host"].rstrip("/")
+    if "router_password" in payload and payload["router_password"] is not None:
+        settings.router_password = payload["router_password"]
+    if "poll_interval" in payload:
+        settings.poll_interval = payload["poll_interval"]
+    if "telegram_enabled" in payload:
+        settings.telegram_enabled = payload["telegram_enabled"]
+    if "telegram_token" in payload and payload["telegram_token"] is not None:
+        settings.telegram_token = payload["telegram_token"]
+    if "telegram_chat_id" in payload:
+        settings.telegram_chat_id = payload["telegram_chat_id"]
+    if "retention_days_normal" in payload:
+        settings.retention_days_normal = payload["retention_days_normal"]
+    if "retention_days_starred" in payload:
+        settings.retention_days_starred = payload["retention_days_starred"]
+
+    settings.save()
+    return {"status": "success", "restart_required": needs_restart}
+
+
+# ---------- Controlled service restart ----------
+async def _exit_for_restart() -> None:
+    # Return the HTTP response first. Docker/Unraid restart policy starts a clean process.
+    await asyncio.sleep(0.8)
+    os._exit(0)
+
+
+@app.post("/api/system/restart", status_code=202)
+async def restart_service(_=Depends(require_csrf)) -> dict[str, Any]:
+    if not settings.self_restart_enabled:
+        raise HTTPException(409, "当前部署未启用服务自重启；请在Docker/Unraid中重启容器")
+    asyncio.create_task(_exit_for_restart())
     return {
-        "status": "success",
-        "restart_required": restart_required,
-        "message": "Configuration saved",
-        "collector_restarted": collector_restarted,
+        "status": "accepted",
+        "message": "服务正在重启",
     }
-
-@app.post("/api/system/restart")
-async def restart_system(_=Depends(require_csrf)):
-    async def _do_restart():
-        await asyncio.sleep(1)
-        os._exit(0)
-    asyncio.create_task(_do_restart())
-    return {"status": "success", "message": "Service is restarting"}
-
 
 
 # ---------- WebSocket ----------

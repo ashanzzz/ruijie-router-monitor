@@ -25,6 +25,29 @@ def integer(value: Any) -> int:
     return max(0, int(number(value)))
 
 
+
+def parse_rssi(item: dict[str, Any]) -> int | None:
+    """Extract a dBm RSSI value without confusing 0-100 quality percentages."""
+    for key in (
+        "rssi",
+        "signal",
+        "signal_strength",
+        "signalStrength",
+        "wifi_rssi",
+        "sta_rssi",
+    ):
+        raw = item.get(key)
+        if raw is None or raw == "":
+            continue
+        try:
+            value = int(float(str(raw).lower().replace("dbm", "").strip()))
+        except (TypeError, ValueError):
+            continue
+        if -150 <= value <= 0:
+            return value
+    return None
+
+
 def traffic_state(rx: float, tx: float) -> str:
     total = rx + tx
     if total >= 2000:
@@ -155,14 +178,12 @@ def parse_clients(raw: Any, ap_map: dict[str, tuple[str, str]]) -> list[DeviceOb
                 parent_node_id=parent_node_id,
                 ssid=str(item.get("ssid") or item.get("wifi_ssid") or "").strip()
                 or None,
+                rssi=parse_rssi(item),
                 rx_counter_bytes=rx_counter,
                 tx_counter_bytes=tx_counter,
                 rx_rate_kbps=round(rx_rate, 1),
                 tx_rate_kbps=round(tx_rate, 1),
                 usage_state=traffic_state(rx_rate, tx_rate),
-                rssi=str(
-                    item.get("rssi") or item.get("signal") or item.get("wifi_signal") or item.get("rssi_val") or ""
-                ).strip() or None,
             )
         )
     return result
