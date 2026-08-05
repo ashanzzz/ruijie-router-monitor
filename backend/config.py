@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import errno
 import os
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Any
 
@@ -23,13 +24,20 @@ def _quote_env(value: Any) -> str:
     return f'"{text}"'
 
 
+class ConfigPersistenceError(RuntimeError):
+    def __init__(self, code: str, message: str):
+        super().__init__(message)
+        self.code = code
+
+
 @dataclass
 class Settings:
     data_dir: Path
     config_file: Path
     app_name: str = "Ruijie Router Monitor"
-    router_host: str = "http://192.168.8.1"
-    router_user: str = "admin"
+    router_host: str = "http://192.168.1.1"
+    # Kept for legacy config-file compatibility. Password-only firmware leaves it empty.
+    router_user: str = ""
     router_password: str = ""
     poll_interval: int = 10
     telegram_token: str = ""
@@ -67,7 +75,6 @@ class Settings:
             file_value = file_values.get(key)
             return str(file_value) if file_value is not None else default
 
-        # Legacy DATABASE_URL is read once for compatibility.
         database_type = value("DATABASE_TYPE", "")
         legacy_url = value("DATABASE_URL", "")
         parsed_legacy = None
@@ -87,8 +94,8 @@ class Settings:
         settings = cls(
             data_dir=data_dir,
             config_file=config_file,
-            router_host=value("RUIJIE_HOST", "http://192.168.8.1").rstrip("/"),
-            router_user=value("RUIJIE_USER", "admin"),
+            router_host=value("RUIJIE_HOST", "http://192.168.1.1").rstrip("/"),
+            router_user=value("RUIJIE_USER", ""),
             router_password=value("RUIJIE_PASS", ""),
             poll_interval=max(3, min(300, int(value("POLL_INTERVAL", "10")))),
             telegram_token=value("TELEGRAM_BOT_TOKEN", ""),
@@ -103,9 +110,15 @@ class Settings:
             db_password=value("DB_PASSWORD", ""),
             db_sslmode=value("DB_SSLMODE", "disable"),
             cookie_secure=_as_bool(value("COOKIE_SECURE", "false")),
-            retention_days_normal=max(1, min(3650, int(value("RETENTION_DAYS_NORMAL", "30")))),
-            retention_days_starred=max(1, min(3650, int(value("RETENTION_DAYS_STARRED", "180")))),
-            self_restart_enabled=_as_bool(value("ALLOW_SELF_RESTART", "true"), True),
+            retention_days_normal=max(
+                1, min(3650, int(value("RETENTION_DAYS_NORMAL", "30")))
+            ),
+            retention_days_starred=max(
+                1, min(3650, int(value("RETENTION_DAYS_STARRED", "180")))
+            ),
+            self_restart_enabled=_as_bool(
+                value("ALLOW_SELF_RESTART", "true"), True
+            ),
         )
 
         if parsed_legacy is not None:
@@ -121,6 +134,16 @@ class Settings:
                 ).name
         return settings
 
+    @property
+    def router_configured(self) -> bool:
+        return bool(self.router_host and self.router_password)
+
+    @property
+    def database_configured(self) -> bool:
+        if self.database_type == "sqlite":
+            return bool(self.sqlite_filename)
+        return bool(self.db_host and self.db_name and self.db_user and self.db_password)
+
     def database_url(self) -> URL:
         if self.database_type == "sqlite":
             filename = validate_sqlite_filename(self.sqlite_filename)
@@ -129,7 +152,7 @@ class Settings:
                 raise ValueError("SQLite file must be inside DATA_DIR")
             return URL.create("sqlite", database=str(path))
 
-        if not all([self.db_host, self.db_name, self.db_user, self.db_password]):
+        if not self.database_configured:
             raise ValueError("PostgreSQL configuration is incomplete")
         return URL.create(
             "postgresql+psycopg",
@@ -175,10 +198,11 @@ class Settings:
             "RETENTION_DAYS_STARRED": self.retention_days_starred,
             "ALLOW_SELF_RESTART": str(self.self_restart_enabled).lower(),
         }
-        fd, temp_path = tempfile.mkstemp(
-            prefix="config.env.", dir=self.data_dir, text=True
-        )
+        temp_path: str | None = None
         try:
+            fd, temp_path = tempfile.mkstemp(
+                prefix="config.env.", dir=self.data_dir, text=True
+            )
             with os.fdopen(fd, "w", encoding="utf-8") as stream:
                 for key, item in values.items():
                     stream.write(f"{key}={_quote_env(item)}\n")
@@ -186,9 +210,33 @@ class Settings:
                 os.fsync(stream.fileno())
             os.chmod(temp_path, 0o600)
             os.replace(temp_path, self.config_file)
+            temp_path = None
+            os.chmod(self.config_file, 0o600)
+        except PermissionError as exc:
+            raise ConfigPersistenceError(
+                "CONFIG_PERMISSION_DENIED",
+                "配置目录不可写，请检查 /app/data 挂载目录权限",
+            ) from exc
+        except OSError as exc:
+            if exc.errno == errno.EROFS:
+                code = "CONFIG_READ_ONLY_FILESYSTEM"
+                message = "配置目录为只读挂载"
+            elif exc.errno == errno.ENOSPC:
+                code = "CONFIG_DISK_FULL"
+                message = "配置目录磁盘空间不足"
+            else:
+                code = "CONFIG_WRITE_FAILED"
+                message = "配置文件写入失败"
+            raise ConfigPersistenceError(code, message) from exc
         finally:
-            if os.path.exists(temp_path):
+            if temp_path and os.path.exists(temp_path):
                 os.unlink(temp_path)
+
+
+def apply_settings(source: Settings, target: Settings) -> None:
+    """Apply a successfully persisted candidate to the process-global settings."""
+    for item in fields(Settings):
+        setattr(target, item.name, getattr(source, item.name))
 
 
 def validate_sqlite_filename(value: str) -> str:

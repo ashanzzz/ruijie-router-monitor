@@ -8,7 +8,7 @@ from sqlalchemy import select
 
 from backend.collector.models import DeviceObservation, NetworkNodeObservation, RouterSnapshot
 from backend.collector.parsers import parse_clients, parse_rssi
-from backend.config import settings
+from backend.config import Settings, settings
 from backend.db import (
     ClientTrafficSample,
     ConnectionHistory,
@@ -18,7 +18,13 @@ from backend.db import (
     NetworkNode,
     db_runtime,
 )
-from backend.main import app, database_status_payload
+from backend.main import (
+    DatabaseConfigPatch,
+    DatabaseRequest,
+    app,
+    database_status_payload,
+    save_database_config,
+)
 from backend.db.runtime import verify_candidate
 from backend.service import cleanup_expired_history, process_snapshot
 from backend.time_utils import utcnow
@@ -285,20 +291,71 @@ def test_retention_uses_longer_window_for_starred_clients_without_deleting_ident
         ) is not None
 
 
-def test_frontend_contains_null_safe_database_normalization_and_no_fixed_reset_password() -> None:
+def test_frontend_contains_configured_cards_and_no_fixed_reset_password() -> None:
     source = Path("frontend/index.html").read_text(encoding="utf-8")
     assert "normalizeDatabaseState" in source
-    assert "const active=state.database.active" in source
     assert "state.database.active.type" not in source
-    assert "routerTestRevision===v.revision" in source
-    assert "dbTestRevision===v.revision" in source
-    assert "validation.routerTestRevision=-1" in source
-    assert "validation.dbTestRevision=-1" in source
+    assert "✓ 已配置" in source
+    assert "重新配置" in source
+    assert "/api/config/router" in source
+    assert "/api/config/database" in source
+    assert "credentialsChanged&&!v.routerProbeToken" in source
     assert "docker exec -it ruijie-router-monitor python -m backend.cli auth reset-password" in source
     assert "123456" not in source
+
+
+def test_database_save_uses_username_and_reverifies(monkeypatch, tmp_path) -> None:
+    from backend import main as main_module
+
+    old_values = settings.__dict__.copy()
+    settings.data_dir = tmp_path
+    settings.config_file = tmp_path / "config.env"
+    settings.database_type = "sqlite"
+    settings.sqlite_filename = "monitor.db"
+
+    verified = []
+
+    def fake_verify(url):
+        verified.append(url)
+        return {"read_write": True, "database": "ruijie", "user": "monitor_user"}
+
+    monkeypatch.setattr(main_module, "verify_candidate", fake_verify)
+    monkeypatch.setattr(main_module.db_runtime, "active_url", settings.database_url())
+
+    request = DatabaseConfigPatch(
+        database=DatabaseRequest(
+            type="postgresql",
+            host="postgres",
+            port=5432,
+            database="ruijie",
+            username="monitor_user",
+            password="secret",
+            sslmode="disable",
+        )
+    )
+    import asyncio
+
+    result = asyncio.run(save_database_config(request, None))
+    assert result["status"] == "success"
+    assert result["restart_required"] is True
+    assert settings.db_user == "monitor_user"
+    assert verified
+    assert "DB_USER=\"monitor_user\"" in settings.config_file.read_text()
+
+    for key, value in old_values.items():
+        setattr(settings, key, value)
+
+
+def test_main_source_has_no_database_request_user_typo() -> None:
+    source = Path("backend/main.py").read_text(encoding="utf-8")
+    assert "payload.database.user or" not in source
+    assert "db_req.user or" not in source
+    assert "payload.database.username" in source
+    assert "verify_candidate(url)" in source
 
 
 def test_password_only_collector_does_not_fill_empty_username() -> None:
     source = Path("backend/collector/supervisor.py").read_text(encoding="utf-8")
     assert "if self.username and await user_input.count()" in source
     assert "Password-only firmware" in source
+

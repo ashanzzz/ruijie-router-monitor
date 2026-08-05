@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
 import logging
 import os
+import secrets
+import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Literal
 
@@ -26,7 +31,13 @@ from backend.auth import (
     setup_admin,
 )
 from backend.collector import RuijieCollectorSupervisor
-from backend.config import Settings, settings, validate_sqlite_filename
+from backend.config import (
+    ConfigPersistenceError,
+    Settings,
+    apply_settings,
+    settings,
+    validate_sqlite_filename,
+)
 from backend.db import (
     ClientTrafficSample,
     ConnectionHistory,
@@ -74,6 +85,9 @@ class WebSocketManager:
 
 ws_manager = WebSocketManager()
 collector: RuijieCollectorSupervisor | None = None
+config_update_lock = asyncio.Lock()
+probe_secret = secrets.token_bytes(32)
+probe_tokens: dict[str, dict[str, Any]] = {}
 
 
 def iso(value: datetime | None) -> str | None:
@@ -163,6 +177,8 @@ def serialize_nodes(db: Session) -> list[dict[str, Any]]:
 
 async def handle_snapshot(snapshot) -> None:
     notifications = await asyncio.to_thread(process_snapshot, snapshot)
+    if collector:
+        collector.runtime.last_database_commit_at = snapshot.collected_at
     for message in notifications:
         asyncio.create_task(send_telegram(message))
     if db_runtime.state == "ready":
@@ -174,6 +190,7 @@ async def handle_snapshot(snapshot) -> None:
                     "timestamp": iso(snapshot.collected_at),
                     "clients": serialize_clients(db),
                     "network_nodes": serialize_nodes(db),
+                    "router": collector.runtime.as_dict() if collector else None,
                 }
             )
 
@@ -249,7 +266,7 @@ class DatabaseRequest(BaseModel):
 
 class ConfigRequest(BaseModel):
     router_host: str = Field(min_length=4, max_length=255)
-    router_user: str = Field(default="admin", max_length=128)
+    router_user: str = Field(default="", max_length=128)
     router_password: str | None = Field(default=None, max_length=512)
     poll_interval: int = Field(default=10, ge=3, le=300)
     telegram_enabled: bool = False
@@ -272,6 +289,43 @@ class RouterDiscoverRequest(BaseModel):
     host: str = Field(min_length=4, max_length=255)
     username: str = Field(default="", max_length=128)
     password: str | None = Field(default=None, max_length=512)
+
+    @field_validator("host")
+    @classmethod
+    def normalize_host(cls, value: str) -> str:
+        value = value.strip().rstrip("/")
+        if not value.startswith(("http://", "https://")):
+            raise ValueError("路由器地址必须以http://或https://开头")
+        return value
+
+
+class RouterConfigPatch(BaseModel):
+    router_host: str | None = Field(default=None, min_length=4, max_length=255)
+    router_password: str | None = Field(default=None, max_length=512)
+    poll_interval: int | None = Field(default=None, ge=3, le=300)
+    router_probe_token: str | None = Field(default=None, max_length=256)
+
+    @field_validator("router_host")
+    @classmethod
+    def normalize_router_host(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip().rstrip("/")
+        if not value.startswith(("http://", "https://")):
+            raise ValueError("路由器地址必须以http://或https://开头")
+        return value
+
+
+class DatabaseConfigPatch(BaseModel):
+    database: DatabaseRequest
+
+
+class GeneralConfigPatch(BaseModel):
+    telegram_enabled: bool | None = None
+    telegram_token: str | None = Field(default=None, max_length=256)
+    telegram_chat_id: str | None = Field(default=None, max_length=128)
+    retention_days_normal: int | None = Field(default=None, ge=1, le=3650)
+    retention_days_starred: int | None = Field(default=None, ge=1, le=3650)
 
 
 class AliasRequest(BaseModel):
@@ -338,11 +392,12 @@ def bootstrap(_=Depends(require_admin)) -> dict[str, Any]:
             nodes = serialize_nodes(db)
     return {
         "status": "success",
-        "collector": collector.status.as_dict() if collector else {"state": "stopped"},
+        "collector": collector.runtime.as_dict() if collector else {"state": "stopped"},
         "database": database_status_payload(),
         "clients": clients,
         "network_nodes": nodes,
         "router_host": settings.router_host,
+        "router": router_status_payload(),
         "server_time": iso(utcnow()),
     }
 
@@ -369,7 +424,23 @@ def database_status(_=Depends(require_admin)) -> dict[str, Any]:
 
 @app.get("/api/diagnostics/collector")
 def collector_diagnostics(_=Depends(require_admin)) -> dict[str, Any]:
-    return collector.status.as_dict() if collector else {"state": "stopped"}
+    return collector.runtime.as_dict() if collector else {"state": "stopped"}
+
+
+def router_status_payload() -> dict[str, Any]:
+    runtime = collector.runtime.as_dict() if collector else {"state": "stopped"}
+    return {
+        "configured": settings.router_configured,
+        "host": settings.router_host,
+        "password_configured": bool(settings.router_password),
+        "poll_interval": settings.poll_interval,
+        "runtime": runtime,
+    }
+
+
+@app.get("/api/router/status")
+def router_status(_=Depends(require_admin)) -> dict[str, Any]:
+    return {"status": "success", "router": router_status_payload()}
 
 
 # ---------- Clients ----------
@@ -692,13 +763,51 @@ def resolve_database_request(payload: DatabaseRequest) -> tuple[URL, str]:
     )
 
 
+def _config_error(exc: ConfigPersistenceError) -> HTTPException:
+    request_id = uuid.uuid4().hex
+    logger.exception(
+        "config save failed request_id=%s code=%s config_file=%s",
+        request_id,
+        exc.code,
+        settings.config_file,
+    )
+    return HTTPException(
+        status_code=500,
+        detail={
+            "code": exc.code,
+            "message": str(exc),
+            "request_id": request_id,
+        },
+    )
+
+
+def _router_fingerprint(host: str, password: str) -> str:
+    message = f"{host.rstrip('/')}\0{password}".encode("utf-8")
+    return hmac.new(probe_secret, message, hashlib.sha256).hexdigest()
+
+
+def _purge_probe_tokens() -> None:
+    now = utcnow()
+    expired = [key for key, item in probe_tokens.items() if item["expires_at"] < now]
+    for key in expired:
+        probe_tokens.pop(key, None)
+
+
+def _database_restart_required(candidate_url: URL) -> bool:
+    active_url = db_runtime.active_url
+    return active_url is None or candidate_url != active_url
+
+
 @app.get("/api/config")
 def get_config(_=Depends(require_admin)) -> dict[str, Any]:
+    router = router_status_payload()
     return {
-        "router_host": settings.router_host,
+        "router": router,
+        # Backward-compatible flat router fields.
+        "router_host": router["host"],
         "router_user": settings.router_user,
-        "router_password_configured": bool(settings.router_password),
-        "poll_interval": settings.poll_interval,
+        "router_password_configured": router["password_configured"],
+        "poll_interval": router["poll_interval"],
         "telegram_enabled": settings.telegram_enabled,
         "telegram_token_configured": bool(settings.telegram_token),
         "telegram_chat_id": settings.telegram_chat_id,
@@ -707,8 +816,25 @@ def get_config(_=Depends(require_admin)) -> dict[str, Any]:
         "database_runtime": database_status_payload(),
         "database": {
             **settings.database_summary(),
+            "configured": settings.database_configured,
             "password_configured": bool(settings.db_password),
         },
+    }
+
+
+@app.get("/api/config/storage-status")
+def storage_status(_=Depends(require_admin)) -> dict[str, Any]:
+    path = settings.config_file
+    parent = path.parent
+    return {
+        "status": "success",
+        "path": str(path),
+        "directory_exists": parent.exists(),
+        "directory_writable": os.access(parent, os.W_OK) if parent.exists() else False,
+        "file_exists": path.exists(),
+        "file_writable": os.access(path, os.W_OK) if path.exists() else True,
+        "uid": os.getuid(),
+        "gid": os.getgid(),
     }
 
 
@@ -722,7 +848,13 @@ def test_database(
         result = verify_candidate(url)
     except Exception as exc:
         logger.exception("Database candidate verification failed")
-        raise HTTPException(400, "数据库连接或读写权限验证失败") from exc
+        raise HTTPException(
+            400,
+            detail={
+                "code": "DATABASE_VERIFICATION_FAILED",
+                "message": "数据库连接或读写权限验证失败",
+            },
+        ) from exc
     return {"status": "success", "message": "数据库连接和读写验证成功", **result}
 
 
@@ -732,10 +864,7 @@ async def discover_router(
     _=Depends(require_csrf),
 ) -> dict[str, Any]:
     password = payload.password
-    same_target = (
-        payload.host.rstrip("/") == settings.router_host.rstrip("/")
-        and payload.username == settings.router_user
-    )
+    same_target = payload.host == settings.router_host
     if not password and same_target:
         password = settings.router_password
     if not password:
@@ -752,12 +881,21 @@ async def discover_router(
         poll_interval=settings.poll_interval,
     )
     try:
-        return await temporary.discover()
+        result = await temporary.discover()
+        token = secrets.token_urlsafe(32)
+        token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+        probe_tokens[token_hash] = {
+            "fingerprint": _router_fingerprint(payload.host, password),
+            "expires_at": utcnow() + timedelta(minutes=5),
+        }
+        result["probe_token"] = token
+        result["tested_at"] = iso(utcnow())
+        return result
     except Exception as exc:
         logger.exception("Router discovery failed")
         raise HTTPException(
             400,
-            {
+            detail={
                 "code": getattr(exc, "code", "DISCOVERY_FAILED"),
                 "message": str(exc),
             },
@@ -774,73 +912,198 @@ async def test_router(
     return await discover_router(payload, _)
 
 
+@app.patch("/api/config/router")
+async def save_router_config(
+    payload: RouterConfigPatch,
+    _=Depends(require_csrf),
+) -> dict[str, Any]:
+    async with config_update_lock:
+        _purge_probe_tokens()
+        candidate = replace(settings)
+        new_host = payload.router_host or settings.router_host
+        new_password = (
+            settings.router_password
+            if payload.router_password is None
+            else payload.router_password
+        )
+        new_interval = payload.poll_interval or settings.poll_interval
+        credentials_changed = (
+            new_host != settings.router_host
+            or new_password != settings.router_password
+            or not settings.router_configured
+        )
+        interval_changed = new_interval != settings.poll_interval
+
+        if credentials_changed:
+            if not payload.router_probe_token:
+                raise HTTPException(422, "请先测试新的路由器地址和密码")
+            token_hash = hashlib.sha256(
+                payload.router_probe_token.encode("utf-8")
+            ).hexdigest()
+            probe = probe_tokens.get(token_hash)
+            if probe is None:
+                raise HTTPException(422, "路由器测试结果已过期，请重新测试")
+            if not hmac.compare_digest(
+                probe["fingerprint"], _router_fingerprint(new_host, new_password)
+            ):
+                raise HTTPException(422, "保存内容与刚才测试的路由器配置不一致")
+            probe_tokens.pop(token_hash, None)
+
+        candidate.router_host = new_host
+        candidate.router_user = ""
+        candidate.router_password = new_password
+        candidate.poll_interval = new_interval
+        try:
+            candidate.save()
+        except ConfigPersistenceError as exc:
+            raise _config_error(exc) from exc
+        apply_settings(candidate, settings)
+
+        if collector and db_runtime.state == "ready":
+            if credentials_changed:
+                revision = collector.runtime.configured_revision + 1
+                await collector.reconfigure(
+                    settings.router_host,
+                    settings.router_user,
+                    settings.router_password,
+                    settings.poll_interval,
+                    revision,
+                )
+            elif interval_changed:
+                collector.update_poll_interval(settings.poll_interval)
+            elif collector.runtime.state in {"not_configured", "stopped"}:
+                await collector.start()
+
+        return {
+            "status": "success",
+            "message": "路由器配置已保存",
+            "router": router_status_payload(),
+            "credentials_changed": credentials_changed,
+            "interval_changed": interval_changed,
+        }
+
+
+@app.patch("/api/config/database")
+async def save_database_config(
+    payload: DatabaseConfigPatch,
+    _=Depends(require_csrf),
+) -> dict[str, Any]:
+    async with config_update_lock:
+        url, database_password = resolve_database_request(payload.database)
+        try:
+            verification = verify_candidate(url)
+        except Exception as exc:
+            logger.exception("Database verification failed before config save")
+            raise HTTPException(
+                400,
+                detail={
+                    "code": "DATABASE_VERIFICATION_FAILED",
+                    "message": "数据库连接或读写验证失败，配置未保存",
+                },
+            ) from exc
+
+        candidate = replace(settings)
+        candidate.database_type = payload.database.type
+        if payload.database.type == "sqlite":
+            candidate.sqlite_filename = validate_sqlite_filename(
+                payload.database.filename or "monitor.db"
+            )
+        else:
+            candidate.db_host = payload.database.host or ""
+            candidate.db_port = payload.database.port or 5432
+            candidate.db_name = payload.database.database or ""
+            # Correct Pydantic field: username, not user.
+            candidate.db_user = payload.database.username or ""
+            candidate.db_password = database_password
+            candidate.db_sslmode = payload.database.sslmode
+
+        restart_required = _database_restart_required(url)
+        try:
+            candidate.save()
+        except ConfigPersistenceError as exc:
+            raise _config_error(exc) from exc
+        apply_settings(candidate, settings)
+        return {
+            "status": "success",
+            "message": "数据库配置已保存",
+            "verification": verification,
+            "configured": settings.database_summary(),
+            "active": db_runtime.summary(),
+            "restart_required": restart_required,
+        }
+
+
+@app.patch("/api/config/general")
+async def save_general_config(
+    payload: GeneralConfigPatch,
+    _=Depends(require_csrf),
+) -> dict[str, Any]:
+    async with config_update_lock:
+        candidate = replace(settings)
+        if payload.telegram_enabled is not None:
+            candidate.telegram_enabled = payload.telegram_enabled
+        if payload.telegram_token is not None:
+            candidate.telegram_token = payload.telegram_token
+        if payload.telegram_chat_id is not None:
+            candidate.telegram_chat_id = payload.telegram_chat_id
+        if payload.retention_days_normal is not None:
+            candidate.retention_days_normal = payload.retention_days_normal
+        if payload.retention_days_starred is not None:
+            candidate.retention_days_starred = payload.retention_days_starred
+        try:
+            candidate.save()
+        except ConfigPersistenceError as exc:
+            raise _config_error(exc) from exc
+        apply_settings(candidate, settings)
+        return {"status": "success", "message": "常规配置已保存"}
+
+
 @app.post("/api/config")
 async def update_config(
     payload: ConfigRequest,
     _=Depends(require_csrf),
 ) -> dict[str, Any]:
-    url, database_password = resolve_database_request(payload.database)
-    try:
-        verification = verify_candidate(url)
-    except Exception as exc:
-        raise HTTPException(400, "数据库连接或读写权限验证失败，配置未保存") from exc
-
-    old_router = (
-        settings.router_host,
-        settings.router_user,
-        settings.router_password,
-        settings.poll_interval,
+    """Backward-compatible full-save endpoint using the safe section handlers."""
+    database_result = await save_database_config(
+        DatabaseConfigPatch(database=payload.database), _
     )
-    old_active = db_runtime.summary()
-
-    settings.router_host = payload.router_host.rstrip("/")
-    settings.router_user = payload.router_user
-    if payload.router_password is not None:
-        settings.router_password = payload.router_password
-    settings.poll_interval = payload.poll_interval
-    settings.telegram_enabled = payload.telegram_enabled
-    if payload.telegram_token is not None:
-        settings.telegram_token = payload.telegram_token
-    settings.telegram_chat_id = payload.telegram_chat_id
-    settings.retention_days_normal = payload.retention_days_normal
-    settings.retention_days_starred = payload.retention_days_starred
-
-    settings.database_type = payload.database.type
-    if payload.database.type == "sqlite":
-        settings.sqlite_filename = validate_sqlite_filename(
-            payload.database.filename or "monitor.db"
-        )
-    else:
-        settings.db_host = payload.database.host or ""
-        settings.db_port = payload.database.port or 5432
-        settings.db_name = payload.database.database or ""
-        settings.db_user = payload.database.username or ""
-        settings.db_password = database_password
-        settings.db_sslmode = payload.database.sslmode
-    settings.save()
-
-    configured = settings.database_summary()
-    restart_required = configured != old_active
-    router_now = (
-        settings.router_host,
-        settings.router_user,
-        settings.router_password,
-        settings.poll_interval,
+    router_result = await save_router_config(
+        RouterConfigPatch(
+            router_host=payload.router_host,
+            router_password=payload.router_password,
+            poll_interval=payload.poll_interval,
+        ),
+        _,
     )
-    collector_restarted = False
-    if collector and router_now != old_router and db_runtime.state == "ready":
-        await collector.reconfigure(*router_now)
-        collector_restarted = True
-
+    await save_general_config(
+        GeneralConfigPatch(
+            telegram_enabled=payload.telegram_enabled,
+            telegram_token=payload.telegram_token,
+            telegram_chat_id=payload.telegram_chat_id,
+            retention_days_normal=payload.retention_days_normal,
+            retention_days_starred=payload.retention_days_starred,
+        ),
+        _,
+    )
     return {
         "status": "success",
-        "message": "配置已保存到/app/data/config.env",
-        "database_verification": verification,
-        "configured_database": configured,
-        "active_database": old_active,
-        "restart_required": restart_required,
-        "collector_restarted": collector_restarted,
+        "router": router_result["router"],
+        "restart_required": database_result["restart_required"],
     }
+
+
+@app.patch("/api/config")
+async def patch_config(
+    payload: dict[str, Any],
+    _=Depends(require_csrf),
+) -> dict[str, Any]:
+    """Compatibility dispatcher for clients released before section endpoints."""
+    if "database" in payload:
+        return await save_database_config(DatabaseConfigPatch(**payload), _)
+    router_keys = {"router_host", "router_password", "poll_interval", "router_probe_token"}
+    if router_keys.intersection(payload):
+        return await save_router_config(RouterConfigPatch(**payload), _)
+    return await save_general_config(GeneralConfigPatch(**payload), _)
 
 
 # ---------- Controlled service restart ----------
