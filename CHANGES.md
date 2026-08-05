@@ -1,8 +1,50 @@
-# 针对最新 GitHub 版本的修复说明
+# Milestone v1.1.0 Release Notes
 
-审查基线：`ad6bd267b4b6d4f2544b3f9e0d9d097bba0f0ce7`
+发布日期: 2026-08-05
 
-## 本次直接修复
+这是一个重大里程碑版本，完整实现了锐捷路由器全量监控、网络设备/客户端层级管理、单管理员安全防护以及 PostgreSQL 高可用数据库热切换与迁移工具。
+
+## 🌟 核心特性与改进
+
+### 1. 全量网络设备与 AP 资产管理 (Issue #49)
+- 支持递归解析 `local_topology` 拓扑树，精准区分网关 (GW)、AP、交换机 (SW) 与未知节点。
+- 前端新增独立“网络设备”页面与选项卡，按卡片与层级结构直观展示下辖客户端与上级拓扑。
+- 点击网络设备可打开右侧动态抽屉，查看设备型号、管理 IP、序列号、上级节点及下挂在线客户端列表。
+
+### 2. 客户端全生命周期详情与漫游轨迹 (Issue #50)
+- 新增客户端右侧动态抽屉面板，集成四大核心维度：
+  - **概览 & 会话**：显示实时上下行速率、IP/SSID/信号强度 (RSSI) 及当前/历史连接会话与使用流量。
+  - **位置 & 漫游**：基于 `RoamingSegment` 模型保存 AP 切换漫游轨迹，真实还原位置变动与停留时长。
+  - **历史流量趋势**：基于 60s 降采样算法保存 `ClientTrafficSample` 流量点，避免无节制写库。
+  - **相关事件**：按时间轴归集上线、下线、高流量与漫游事件。
+- 支持客户端与网络设备分别独立添加星标 (关注)。
+
+### 3. 单管理员安全鉴权体系 (Issue #51)
+- 独立控制数据库 `control.db`，使用 Argon2id 安全哈希保存管理员密码，与业务数据库解耦。
+- 全局防护 HTTP/WebSocket 接口，提供 HttpOnly Cookie + CSRF Token 双重安全保障。
+- 提供容器命令行应急重置：
+  ```bash
+  docker exec -it ruijie-router-monitor python -m backend.cli auth reset-password
+  ```
+
+### 4. 健壮的配置持久化与采集热重载 (Issues #55, #56)
+- 配置落盘采用 `tempfile` + `fsync` + `os.replace` 原子写入，彻底解决目录挂载/磁盘满抛出 500 的问题。
+- `RuijieCollectorSupervisor` 引入 `_lifecycle_lock`，保存配置后在后台无缝重启采集循环，无需重启 Docker 容器。
+- 增加 `POST /api/router/discover` 颁发短时加密 `probe_token`，确保保存的凭据 100% 验证通过。
+
+### 5. PostgreSQL/SQLite 平滑兼容与表结构自动升轨 (Issues #47, #52, #54)
+- 数据库切换采用 `configured` 与 `active` 状态隔离，提供页面持久化 Banner 提醒。
+- PostgreSQL 连接采用 `URL.create()`，完美支持特殊字符与转义密码。
+- 增加了针对历史表（如 `processed_snapshots`、`devices`）遗漏字段的自动 `ALTER TABLE` 升级与 `NOT NULL` 约束解除，解决连接既有 PostgreSQL 报 500 的兼容性断层。
+
+### 6. SQLite 至 PostgreSQL 数据无损迁移 CLI 工具 (Issue #53)
+- 提供极简的数据迁移脚本，支持按批次 (Batching) 无损分流传输历史客户端、会话与日志：
+  ```bash
+  python -m backend.cli database migrate --source-sqlite /app/data/monitor.db
+  ```
+- 包含 `--dry-run` 预览测试与序列 (Sequence) 计数自动修正。
+
+---
 
 ### 1. 设置弹窗崩溃
 
