@@ -124,18 +124,51 @@ def apply_legacy_column_upgrades(engine: Engine) -> None:
     inspector = inspect(engine)
     tables = set(inspector.get_table_names())
     additions: dict[str, list[tuple[str, str]]] = {
-        "network_clients": [
+        "devices": [
             ("parent_node_id", "VARCHAR(160)"),
             ("is_starred", "BOOLEAN DEFAULT false"),
             ("rssi", "INTEGER"),
+            ("rx_counter_bytes", "BIGINT DEFAULT 0"),
+            ("tx_counter_bytes", "BIGINT DEFAULT 0"),
+            ("ssid", "VARCHAR(255)"),
+            ("ap_sn", "VARCHAR(128)"),
+            ("ap_name", "VARCHAR(255)"),
+            ("last_online_at", "TIMESTAMP"),
+            ("last_offline_at", "TIMESTAMP"),
+            ("usage_state", "VARCHAR(64) DEFAULT '空闲'"),
         ],
         "network_nodes": [
             ("serial_number", "VARCHAR(160)"),
-            ("alias", "VARCHAR(255)")
+            ("alias", "VARCHAR(255)"),
+            ("model", "VARCHAR(128)"),
+            ("management_ip", "VARCHAR(64)"),
+            ("parent_node_id", "VARCHAR(160)"),
+            ("is_online", "BOOLEAN DEFAULT true"),
+            ("is_starred", "BOOLEAN DEFAULT false"),
+            ("last_offline_at", "TIMESTAMP"),
         ],
-        "client_traffic_samples": [("rssi", "INTEGER")],
-        "event_logs": [("node_id", "VARCHAR(160)")],
-        "processed_snapshots": [("source", "VARCHAR(64)")],
+        "connection_history": [
+            ("start_rx_counter", "BIGINT DEFAULT 0"),
+            ("start_tx_counter", "BIGINT DEFAULT 0"),
+            ("last_rx_counter", "BIGINT DEFAULT 0"),
+            ("last_tx_counter", "BIGINT DEFAULT 0"),
+            ("session_rx_bytes", "BIGINT DEFAULT 0"),
+            ("session_tx_bytes", "BIGINT DEFAULT 0"),
+            ("initial_parent_node_id", "VARCHAR(160)"),
+            ("last_parent_node_id", "VARCHAR(160)"),
+        ],
+        "client_traffic_samples": [
+            ("rssi", "INTEGER"),
+            ("parent_node_id", "VARCHAR(160)"),
+        ],
+        "event_logs": [
+            ("node_id", "VARCHAR(160)"),
+        ],
+        "processed_snapshots": [
+            ("source", "VARCHAR(64) DEFAULT 'probe'"),
+            ("client_count", "INTEGER DEFAULT 0"),
+            ("node_count", "INTEGER DEFAULT 0"),
+        ],
     }
     with engine.begin() as connection:
         for table, columns in additions.items():
@@ -155,6 +188,8 @@ def apply_legacy_column_upgrades(engine: Engine) -> None:
 def verify_candidate(url: URL) -> dict[str, Any]:
     engine = create_database_engine(url)
     try:
+        Base.metadata.create_all(engine)
+        apply_legacy_column_upgrades(engine)
         with engine.begin() as connection:
             if url.drivername.startswith("postgresql"):
                 row = connection.execute(
