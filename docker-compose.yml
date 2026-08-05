@@ -4,7 +4,10 @@ services:
     container_name: ruijie-router-monitor
     restart: unless-stopped
     init: true
+    stop_grace_period: 30s
     shm_size: "512mb"
+    environment:
+      ALLOW_SELF_RESTART: "true"
     ports:
       - "8080:8080"
     volumes:

@@ -15,6 +15,7 @@ from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 from backend.collector.models import CollectorStatus, RouterSnapshot
 from backend.collector.parsers import parse_clients, parse_topology
 from backend.config import settings
+from backend.time_utils import utcnow
 
 logger = logging.getLogger("ruijie_collector")
 
@@ -174,10 +175,11 @@ class RuijieCollectorSupervisor:
         user_input = self._page.locator(
             'input[name="username"], input[name="user"], input[type="text"]'
         ).first
-        if await user_input.count() and await user_input.is_visible():
+        if self.username and await user_input.count() and await user_input.is_visible():
             await user_input.fill(self.username)
             auth_mode = "username_password"
         else:
+            # Password-only firmware: do not touch a hidden/optional username field.
             auth_mode = "password_only"
 
         password = self._page.locator('input[type="password"]').first
@@ -207,7 +209,7 @@ class RuijieCollectorSupervisor:
 
         if await password.is_visible():
             raise AuthenticationError("登录后密码框仍可见，认证未成功")
-        self.status.last_login_at = datetime.utcnow()
+        self.status.last_login_at = utcnow()
         self.status.profile_id = f"ruijie-eweb-{auth_mode}"
         self.status.state = "discovering"
 
@@ -325,7 +327,7 @@ class RuijieCollectorSupervisor:
         nodes, ap_map = parse_topology(self._latest_topology)
         devices = parse_clients(self._latest_clients, ap_map)
         self._sequence += 1
-        collected_at = datetime.utcnow()
+        collected_at = utcnow()
         return RouterSnapshot(
             snapshot_id=f"{self._session_id}:{self._sequence}",
             collected_at=collected_at,

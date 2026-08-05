@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -40,6 +41,7 @@ from backend.db import (
 from backend.db.runtime import verify_candidate
 from backend.notifier import send_telegram
 from backend.service import process_snapshot
+from backend.time_utils import utcnow
 
 logging.basicConfig(
     level=logging.INFO,
@@ -101,6 +103,7 @@ def serialize_clients(db: Session) -> list[dict[str, Any]]:
                     else item.ap_name
                 ),
                 "ssid": item.ssid,
+                "rssi": item.rssi,
                 "is_online": bool(item.is_online),
                 "is_starred": bool(item.is_starred),
                 "rx_rate": item.rx_rate or 0,
@@ -196,7 +199,7 @@ async def lifespan(app: FastAPI):
         db_runtime.dispose()
 
 
-app = FastAPI(title=settings.app_name, version="2.0.0", lifespan=lifespan)
+app = FastAPI(title=settings.app_name, version="2.1.0", lifespan=lifespan)
 
 
 # ---------- Request models ----------
@@ -252,6 +255,8 @@ class ConfigRequest(BaseModel):
     telegram_enabled: bool = False
     telegram_token: str | None = Field(default=None, max_length=256)
     telegram_chat_id: str = Field(default="", max_length=128)
+    retention_days_normal: int = Field(default=30, ge=1, le=3650)
+    retention_days_starred: int = Field(default=180, ge=1, le=3650)
     database: DatabaseRequest
 
     @field_validator("router_host")
@@ -265,7 +270,7 @@ class ConfigRequest(BaseModel):
 
 class RouterDiscoverRequest(BaseModel):
     host: str = Field(min_length=4, max_length=255)
-    username: str = Field(default="admin", max_length=128)
+    username: str = Field(default="", max_length=128)
     password: str | None = Field(default=None, max_length=512)
 
 
@@ -337,7 +342,8 @@ def bootstrap(_=Depends(require_admin)) -> dict[str, Any]:
         "database": database_status_payload(),
         "clients": clients,
         "network_nodes": nodes,
-        "server_time": iso(datetime.utcnow()),
+        "router_host": settings.router_host,
+        "server_time": iso(utcnow()),
     }
 
 
@@ -480,7 +486,7 @@ def client_traffic(
     _=Depends(require_admin),
 ) -> dict:
     duration = {"2h": timedelta(hours=2), "24h": timedelta(days=1), "7d": timedelta(days=7), "30d": timedelta(days=30)}[range]
-    since = datetime.utcnow() - duration
+    since = utcnow() - duration
     rows = list(
         db.scalars(
             select(ClientTrafficSample)
@@ -499,6 +505,7 @@ def client_traffic(
                 "rx_rate_kbps": item.rx_rate_kbps,
                 "tx_rate_kbps": item.tx_rate_kbps,
                 "parent_node_id": item.parent_node_id,
+                "rssi": item.rssi,
             }
             for item in rows
         ],
@@ -556,7 +563,7 @@ def alias_client(
             db.add(item)
         else:
             item.alias = value
-            item.updated_at = datetime.utcnow()
+            item.updated_at = utcnow()
     elif item is not None:
         db.delete(item)
     db.commit()
@@ -695,6 +702,9 @@ def get_config(_=Depends(require_admin)) -> dict[str, Any]:
         "telegram_enabled": settings.telegram_enabled,
         "telegram_token_configured": bool(settings.telegram_token),
         "telegram_chat_id": settings.telegram_chat_id,
+        "retention_days_normal": settings.retention_days_normal,
+        "retention_days_starred": settings.retention_days_starred,
+        "database_runtime": database_status_payload(),
         "database": {
             **settings.database_summary(),
             "password_configured": bool(settings.db_password),
@@ -792,6 +802,8 @@ async def update_config(
     if payload.telegram_token is not None:
         settings.telegram_token = payload.telegram_token
     settings.telegram_chat_id = payload.telegram_chat_id
+    settings.retention_days_normal = payload.retention_days_normal
+    settings.retention_days_starred = payload.retention_days_starred
 
     settings.database_type = payload.database.type
     if payload.database.type == "sqlite":
@@ -828,6 +840,24 @@ async def update_config(
         "active_database": old_active,
         "restart_required": restart_required,
         "collector_restarted": collector_restarted,
+    }
+
+
+# ---------- Controlled service restart ----------
+async def _exit_for_restart() -> None:
+    # Return the HTTP response first. Docker/Unraid restart policy starts a clean process.
+    await asyncio.sleep(0.8)
+    os._exit(0)
+
+
+@app.post("/api/system/restart", status_code=202)
+async def restart_service(_=Depends(require_csrf)) -> dict[str, Any]:
+    if not settings.self_restart_enabled:
+        raise HTTPException(409, "当前部署未启用服务自重启；请在Docker/Unraid中重启容器")
+    asyncio.create_task(_exit_for_restart())
+    return {
+        "status": "accepted",
+        "message": "服务正在重启",
     }
 
 

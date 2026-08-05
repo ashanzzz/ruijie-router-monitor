@@ -2,12 +2,10 @@ from __future__ import annotations
 
 from datetime import datetime
 
+from backend.time_utils import utcnow
+
 from sqlalchemy import BigInteger, Boolean, DateTime, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
-
-
-def utcnow() -> datetime:
-    return datetime.utcnow()
 
 
 class Base(DeclarativeBase):
@@ -26,6 +24,7 @@ class Device(Base):
         String(160), ForeignKey("network_nodes.node_id"), index=True
     )
     ssid: Mapped[str | None] = mapped_column(String(255))
+    rssi: Mapped[int | None] = mapped_column(Integer)
     is_online: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
     first_seen: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     last_seen: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
@@ -111,6 +110,7 @@ class ClientTrafficSample(Base):
     rx_counter_bytes: Mapped[int] = mapped_column(BigInteger, default=0)
     tx_counter_bytes: Mapped[int] = mapped_column(BigInteger, default=0)
     parent_node_id: Mapped[str | None] = mapped_column(String(160), index=True)
+    rssi: Mapped[int | None] = mapped_column(Integer)
 
 
 class EventLog(Base):

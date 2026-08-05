@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass, field
 from datetime import datetime
 from threading import RLock
@@ -11,6 +12,7 @@ from sqlalchemy import Engine, URL, create_engine, inspect, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from backend.config import Settings, settings
+from backend.time_utils import utcnow
 from backend.db.models import Base
 
 logger = logging.getLogger("database")
@@ -37,6 +39,8 @@ class DatabaseRuntime:
                 connection.execute(text("SELECT 1"))
             Base.metadata.create_all(candidate)
             apply_legacy_column_upgrades(candidate)
+            if candidate_url.drivername.startswith("sqlite") and candidate_url.database:
+                os.chmod(candidate_url.database, 0o600)
         except Exception as exc:
             candidate.dispose()
             self.state = "connection_failed"
@@ -55,7 +59,7 @@ class DatabaseRuntime:
             )
             self.active_url = candidate_url
             self.state = "ready"
-            self.last_connected_at = datetime.utcnow()
+            self.last_connected_at = utcnow()
             self.last_error = None
 
     def session(self) -> Session:
@@ -78,6 +82,7 @@ class DatabaseRuntime:
             "port": url.port or 5432,
             "database": url.database,
             "user": url.username,
+            "sslmode": str(url.query.get("sslmode", "disable")),
         }
 
     def dispose(self) -> None:
@@ -123,6 +128,7 @@ def apply_legacy_column_upgrades(engine: Engine) -> None:
             ("parent_node_id", "VARCHAR(160)"),
             ("rx_counter_bytes", "BIGINT DEFAULT 0"),
             ("tx_counter_bytes", "BIGINT DEFAULT 0"),
+            ("rssi", "INTEGER"),
         ],
         "connection_history": [
             ("start_rx_counter", "BIGINT DEFAULT 0"),
@@ -134,6 +140,7 @@ def apply_legacy_column_upgrades(engine: Engine) -> None:
             ("initial_parent_node_id", "VARCHAR(160)"),
             ("last_parent_node_id", "VARCHAR(160)"),
         ],
+        "client_traffic_samples": [("rssi", "INTEGER")],
         "event_logs": [("node_id", "VARCHAR(160)")],
     }
     with engine.begin() as connection:
@@ -165,15 +172,27 @@ def verify_candidate(url: URL) -> dict[str, Any]:
                 connection.execute(
                     text("INSERT INTO ruijie_monitor_probe VALUES (1, 'ok')")
                 )
-                assert connection.execute(
+                probe_value = connection.execute(
                     text("SELECT value FROM ruijie_monitor_probe WHERE id=1")
-                ).scalar_one() == "ok"
+                ).scalar_one()
+                if probe_value != "ok":
+                    raise RuntimeError("PostgreSQL temporary write verification failed")
                 return {
                     "database": row[0],
                     "user": row[1],
                     "read_write": True,
                 }
-            connection.execute(text("SELECT 1"))
+            connection.execute(
+                text("CREATE TEMP TABLE ruijie_monitor_probe (id INTEGER PRIMARY KEY, value TEXT NOT NULL)")
+            )
+            connection.execute(
+                text("INSERT INTO ruijie_monitor_probe(id, value) VALUES (1, 'ok')")
+            )
+            probe_value = connection.execute(
+                text("SELECT value FROM ruijie_monitor_probe WHERE id=1")
+            ).scalar_one()
+            if probe_value != "ok":
+                raise RuntimeError("SQLite temporary write verification failed")
             return {"read_write": True}
     finally:
         engine.dispose()
