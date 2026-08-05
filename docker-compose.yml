@@ -1,20 +1,11 @@
-version: '3.8'
-
 services:
-  ruijie-monitor:
+  ruijie-router-monitor:
     build: .
-    container_name: ruijie_router_monitor
-    restart: always
+    container_name: ruijie-router-monitor
+    restart: unless-stopped
+    init: true
+    shm_size: "512mb"
     ports:
       - "8080:8080"
     volumes:
       - ./data:/app/data
-    environment:
-      - RUIJIE_HOST=http://192.168.110.1
-      - RUIJIE_USER=admin
-      - RUIJIE_PASS=admin
-      - COLLECTOR_MODE=demo
-      - POLL_INTERVAL=3
-      - TELEGRAM_ENABLE=false
-      - TELEGRAM_BOT_TOKEN=
-      - TELEGRAM_CHAT_ID=

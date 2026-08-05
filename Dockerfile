@@ -1,26 +1,25 @@
 FROM python:3.11-slim
 
 WORKDIR /app
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONPATH=/app \
+    DATA_DIR=/app/data \
+    CONFIG_FILE=/app/data/config.env
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl \
-    && rm -rf /var/lib/apt/lists/*
-
-# Copy backend requirements & install
 COPY backend/requirements.txt /app/backend/requirements.txt
-RUN pip install --no-cache-dir -r /app/backend/requirements.txt
+RUN pip install --no-cache-dir -r /app/backend/requirements.txt \
+    && python -m playwright install --with-deps chromium
 
-# Copy application files
 COPY backend /app/backend
 COPY frontend /app/frontend
+RUN mkdir -p /app/data \
+    && useradd --create-home --uid 10001 appuser \
+    && chown -R appuser:appuser /app
+USER appuser
 
-# Create data volume directory
-RUN mkdir -p /app/data
-
+VOLUME ["/app/data"]
 EXPOSE 8080
-
-ENV PYTHONUNBUFFERED=1
-ENV PYTHONPATH=/app/backend
-
-CMD ["python", "-m", "uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8080"]
+HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
+  CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/api/health/live', timeout=3)" || exit 1
+CMD ["python", "-m", "uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8080", "--workers", "1"]

@@ -1,0 +1,3 @@
+Source repository: https://github.com/ashanzzz/ruijie-router-monitor
+Reviewed base commit: 59a6ee4cc92b7dce119bb446eff9915d155f5cf8
+Package type: source-code reconstruction and direct refactor; Git history is not included.

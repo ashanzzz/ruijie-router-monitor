@@ -1,42 +1,78 @@
-# Ruijie Router Monitor (锐捷星耀/睿易局域网监控助手)
+# Ruijie Router Monitor 2.0
 
-这是一个自用性质的微型项目，旨在为家庭或小型办公室提供一个**够用、稳定、高效**的局域网设备监控面板。
+面向锐捷/睿易 eWeb 本地管理页面的单容器局域网监控服务。
 
-由于锐捷官方的 Web 页面和 App 有时无法满足我们对数据持久化和灵活展示的需求，所以写了这个小工具，把路由器的底层数据拉出来自己用。
+本版本重点修复：
 
-## 项目宗旨 (Philosophy)
-- **够用就好**：不搞庞大的微服务和复杂的架构，前后端单体运行，解决“设备连在哪里、跑了多少流量”的核心痛点即可。
-- **稳定优先**：为了避免和锐捷官方经常变动的加密算法死磕，我们选用了无头浏览器（Playwright）模拟正常登录来获取数据，虽然看着不那么“极客”，但绝不掉线，非常省心。
-- **高效轻量**：底层可以跑在极低资源的 NAS 或软路由上，提供无感知的自动化记录。
+- PostgreSQL 驱动、特殊字符密码、真实读写测试和活动数据库状态。
+- 配置固定保存到 `/app/data/config.env`，更新/重建容器后不丢失。
+- Playwright 在进程内完成登录；首次从页面学习 `user_list` 与 `local_topology` 请求，随后优先使用共享 Cookie 的 APIRequestContext 直采。
+- 完整快照单事务写入，数据库成功后才推送 WebSocket/Telegram。
+- AP、网关、交换机落库，支持网络设备关注列表。
+- 客户端详情包含上下线会话、会话增量流量、位置段和每分钟流量采样。
+- 首次启动强制设置单管理员密码；未登录无法访问业务 API 与 WebSocket。
 
-## 核心功能
-1. **真实物理拓扑解析**：自动解析局域网，告诉你设备连在哪个 AP 上（比如“客厅”、“卧室”），而不是只显示一堆看不懂的序列号。
-2. **设备长效会话档案**：自动为每一台设备的上下线建立简单的历史档案，记录漫游轨迹和本次连接消耗的流量。
-3. **数据库灵活配置**：默认开箱即用 SQLite；同时也支持在网页端无缝热切换到您局域网里的 PostgreSQL（强烈推荐，可避免网盘同步导致的数据损坏）。
-4. **轻量可视化与告警**：带有一个简单的深色主题面板查看全局流量，并支持通过 Telegram 机器人推送新设备上线或大流量告警。
+## Docker Compose
 
-## 快速开始
-
-### 1. 环境准备
-项目基于 Python 3.10+ 开发，依赖不多，跑起来很简单：
 ```bash
-# 安装必要的 Python 库
-pip install -r requirements.txt
-
-# 初始化浏览器内核 (首次运行必须执行)
-playwright install chromium
+docker compose up -d --build
 ```
 
-### 2. 启动服务
-```bash
-cd backend
-python -m uvicorn main:app --host 0.0.0.0 --port 8080
+打开 `http://服务器IP:8080`，首次进入先设置管理员密码。
+
+## 持久化
+
+必须持久化：
+
+```text
+/app/data
 ```
 
-### 3. 使用与配置
-- 浏览器打开 `http://localhost:8080`（或者直接用浏览器打开 `frontend/index.html`）。
-- 点击右上角的 **⚙️ 系统设置** 按钮，填写您的锐捷管理地址（如 `http://192.168.8.1`）以及密码。
-- 如果您有局域网内的 PostgreSQL，可以在设置里填入连接串进行测试并保存，系统会自动切库建表。
+其中包含：
 
-## License
-MIT
+```text
+config.env   路由器、数据库和Telegram配置
+control.db   管理员哈希与服务端会话
+monitor.db   默认SQLite业务数据
+```
+
+## PostgreSQL
+
+设置页填写 Host、Port、Database、Username、Password。测试会验证：
+
+- 登录和 `SELECT`
+- 临时表创建
+- `INSERT`
+- 事务读回
+
+保存新的数据库目标后需要重启容器。页面会同时显示“已配置数据库”和“当前活动数据库”，两者一致后才代表切换完成。
+
+## 管理员密码重置
+
+```bash
+docker exec -it ruijie-router-monitor \
+  python -m backend.cli auth reset-password
+```
+
+密码不会作为命令行参数出现。重置后全部旧会话失效。
+
+## SQLite 迁移 PostgreSQL
+
+先停止主容器，并确认 `/app/data/config.env` 已配置目标 PostgreSQL：
+
+```bash
+docker stop ruijie-router-monitor
+
+docker run --rm -it --network host \
+  -v "$PWD/data:/app/data" \
+  ruijie-router-monitor \
+  python -m backend.cli database migrate \
+  --source-sqlite /app/data/monitor.db \
+  --dry-run
+```
+
+检查无误后去掉 `--dry-run`。目标表必须为空；工具不会静默覆盖已有数据。
+
+## 重要边界
+
+锐捷未公开跨型号稳定的 eWeb 私有 API。不同固件可能改变菜单文字、请求体或返回结构。本项目会先通过真实页面识别请求，再优先直采；识别失败时页面会显示具体采集错误，不生成 Demo 数据。
