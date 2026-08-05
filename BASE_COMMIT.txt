@@ -1,3 +1,5 @@
 Source repository: https://github.com/ashanzzz/ruijie-router-monitor
-Reviewed latest commit: ad6bd267b4b6d4f2544b3f9e0d9d097bba0f0ce7
-Package: repaired and git-initialized source tree
+Reviewed upstream commit: 9b5058efff584091b2b359daba54720faf3fff6f
+Upstream commit date: 2026-08-05
+Package branch: agent/fix-configured-router-database-save
+Package type: repaired, git-initialized source tree; it is not a byte-for-byte clone of the complete upstream Git history.
