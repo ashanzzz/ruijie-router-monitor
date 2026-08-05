@@ -335,11 +335,18 @@ class RuijieCollectorSupervisor:
         headers = {}
         if template.content_type:
             headers["content-type"] = template.content_type
+        post_data = template.post_data
+        if command == "user_list" and isinstance(post_data, str):
+            import re
+            post_data = re.sub(r'("pageSize"\s*:\s*)\d+', r'\1 2000', post_data)
+            post_data = re.sub(r'(pageSize=)\d+', r'\1 2000', post_data)
+            post_data = re.sub(r'("limit"\s*:\s*)\d+', r'\1 2000', post_data)
+            post_data = re.sub(r'(limit=)\d+', r'\1 2000', post_data)
         response = await self._context.request.fetch(
             template.url,
             method=template.method,
             headers=headers,
-            data=template.post_data,
+            data=post_data,
             timeout=8000,
             fail_on_status_code=False,
         )
@@ -380,11 +387,16 @@ class RuijieCollectorSupervisor:
         devices = parse_clients(self._latest_clients, ap_map)
         self._sequence += 1
         collected_at = utcnow()
+        complete = True
+        if isinstance(self._latest_clients, dict):
+            total = self._latest_clients.get("total") or self._latest_clients.get("totalCount") or self._latest_clients.get("count")
+            if isinstance(total, (int, float)) and total > 0 and len(devices) < total:
+                complete = False
         return RouterSnapshot(
             snapshot_id=f"{self._session_id}:{self._sequence}",
             collected_at=collected_at,
             source=source,
-            complete=True,
+            complete=complete,
             devices=tuple(devices),
             nodes=tuple(nodes),
         )

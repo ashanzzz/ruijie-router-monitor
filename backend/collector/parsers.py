@@ -166,7 +166,14 @@ def parse_clients(raw: Any, ap_map: dict[str, tuple[str, str]]) -> list[DeviceOb
                 ip=str(item.get("ip") or item.get("ip_addr") or item.get("userIp") or "").strip()
                 or None,
                 hostname=str(
-                    item.get("hostname")
+                    item.get("alias")
+                    or item.get("aliasName")
+                    or item.get("deviceAliasName")
+                    or item.get("deviceAlias")
+                    or item.get("remark")
+                    or item.get("user_name")
+                    or item.get("customName")
+                    or item.get("hostname")
                     or item.get("hostName")
                     or item.get("name")
                     or item.get("dhcp_name")
