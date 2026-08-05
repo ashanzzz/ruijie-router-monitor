@@ -338,26 +338,62 @@ class RuijieCollectorSupervisor:
         post_data = template.post_data
         if command == "user_list" and isinstance(post_data, str):
             import re
-            post_data = re.sub(r'("pageSize"\s*:\s*)\d+', r'\1 2000', post_data)
-            post_data = re.sub(r'(pageSize=)\d+', r'\1 2000', post_data)
-            post_data = re.sub(r'("limit"\s*:\s*)\d+', r'\1 2000', post_data)
-            post_data = re.sub(r'(limit=)\d+', r'\1 2000', post_data)
-        response = await self._context.request.fetch(
-            template.url,
-            method=template.method,
-            headers=headers,
-            data=post_data,
-            timeout=8000,
-            fail_on_status_code=False,
-        )
-        if response.status in {401, 403}:
-            raise AuthenticationError("路由器会话已过期")
-        if not response.ok:
-            raise CollectorError(f"{command}接口返回HTTP {response.status}")
-        payload = await response.json()
-        if not isinstance(payload, dict) or payload.get("code") != 0:
-            raise CollectorError(f"{command}接口业务返回失败")
-        return payload.get("data")
+            post_data = re.sub(r'("pageSize"\s*:\s*)\d+', r'\g<1>2000', post_data)
+            post_data = re.sub(r'(pageSize=)\d+', r'\g<1>2000', post_data)
+            post_data = re.sub(r'("limit"\s*:\s*)\d+', r'\g<1>2000', post_data)
+            post_data = re.sub(r'(limit=)\d+', r'\g<1>2000', post_data)
+
+        async def fetch_one(raw_data: Any) -> Any:
+            resp = await self._context.request.fetch(
+                template.url,
+                method=template.method,
+                headers=headers,
+                data=raw_data,
+                timeout=8000,
+                fail_on_status_code=False,
+            )
+            if resp.status in {401, 403}:
+                raise AuthenticationError("路由器会话已过期")
+            if not resp.ok:
+                raise CollectorError(f"{command}接口返回HTTP {resp.status}")
+            payload = await resp.json()
+            if not isinstance(payload, dict) or payload.get("code") != 0:
+                raise CollectorError(f"{command}接口业务返回失败")
+            return payload.get("data")
+
+        data = await fetch_one(post_data)
+
+        if command == "user_list" and isinstance(data, dict) and isinstance(post_data, str):
+            import math, re
+            items_key = "list" if "list" in data else ("users" if "users" in data else None)
+            items = data.get(items_key) if items_key else []
+            total = int(data.get("total") or data.get("totalCount") or data.get("count") or 0)
+
+            if items_key and isinstance(items, list) and total > len(items) and len(items) > 0:
+                page_size = len(items)
+                max_page = min(math.ceil(total / page_size), 30)
+                all_items = list(items)
+
+                for page in range(2, max_page + 1):
+                    p_data = re.sub(r'("page"\s*:\s*)\d+', f'\\g<1>{page}', post_data)
+                    p_data = re.sub(r'(page=)\d+', f'\\g<1>{page}', p_data)
+                    p_data = re.sub(r'("pageIndex"\s*:\s*)\d+', f'\\g<1>{page}', p_data)
+                    try:
+                        p_res = await fetch_one(p_data)
+                        if isinstance(p_res, dict):
+                            p_items = p_res.get(items_key) or []
+                            if isinstance(p_items, list) and p_items:
+                                all_items.extend(p_items)
+                                if len(all_items) >= total:
+                                    break
+                            else:
+                                break
+                    except Exception as e:
+                        logger.warning(f"Fetching user_list page {page} failed: {e}")
+                        break
+                data[items_key] = all_items
+
+        return data
 
     async def collect_once(self) -> RouterSnapshot:
         await self._ensure_logged_in()
