@@ -202,7 +202,7 @@ class RuijieCollectorSupervisor:
                 delay = min(delay * 2, 60)
 
     async def _ensure_logged_in(self) -> None:
-        if self._page and not self._page.is_closed():
+        if self._page and not self._page.is_closed() and self.runtime.authenticated:
             return
         self.runtime.state = "authenticating"
         from playwright.async_api import async_playwright
@@ -305,7 +305,7 @@ class RuijieCollectorSupervisor:
             event.clear()
         candidates = (
             ("user_list", ("终端", "客户端", "Clients")),
-            ("local_topology", ("整网", "首页", "Home")),
+            ("local_topology", ("整网", "首页", "Home", "Network-Wide", "Devices")),
         )
         for command, labels in candidates:
             if command in self._templates and (
