@@ -341,6 +341,7 @@ def bootstrap(_=Depends(require_admin)) -> dict[str, Any]:
         "clients": clients,
         "network_nodes": nodes,
         "server_time": iso(datetime.utcnow()),
+        "router_host": settings.router_host,
     }
 
 
