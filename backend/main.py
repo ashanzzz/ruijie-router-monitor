@@ -884,7 +884,7 @@ async def patch_config(
             candidate.db_host = db_req.host or ""
             candidate.db_port = db_req.port or 5432
             candidate.db_name = db_req.database or ""
-            candidate.db_user = db_req.user or ""
+            candidate.db_user = db_req.username or ""
             if new_db_password is not None:
                 candidate.db_password = new_db_password
             candidate.db_sslmode = db_req.sslmode or "disable"

@@ -183,6 +183,17 @@ def apply_legacy_column_upgrades(engine: Engine) -> None:
                         )
                     except Exception:
                         pass
+        if "processed_snapshots" in tables:
+            ps_cols = {item["name"]: item for item in inspector.get_columns("processed_snapshots")}
+            for old_col in ("processed_at", "device_count"):
+                if old_col in ps_cols and not ps_cols[old_col].get("nullable", True):
+                    try:
+                        if engine.dialect.name == "postgresql":
+                            connection.execute(
+                                text(f'ALTER TABLE "processed_snapshots" ALTER COLUMN "{old_col}" DROP NOT NULL')
+                            )
+                    except Exception:
+                        pass
 
 
 def verify_candidate(url: URL) -> dict[str, Any]:
