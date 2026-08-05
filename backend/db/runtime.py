@@ -135,6 +135,7 @@ def apply_legacy_column_upgrades(engine: Engine) -> None:
         ],
         "client_traffic_samples": [("rssi", "INTEGER")],
         "event_logs": [("node_id", "VARCHAR(160)")],
+        "processed_snapshots": [("source", "VARCHAR(64)")],
     }
     with engine.begin() as connection:
         for table, columns in additions.items():
