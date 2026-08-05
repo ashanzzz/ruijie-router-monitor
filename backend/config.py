@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import errno
 import os
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +22,12 @@ def _as_bool(value: str | bool | None, default: bool = False) -> bool:
 def _quote_env(value: Any) -> str:
     text = str(value).replace("\\", "\\\\").replace('"', '\\"')
     return f'"{text}"'
+
+
+class ConfigPersistenceError(RuntimeError):
+    def __init__(self, code: str, message: str):
+        super().__init__(message)
+        self.code = code
 
 
 @dataclass
@@ -172,20 +179,37 @@ class Settings:
             "RETENTION_DAYS_STARRED": self.retention_days_starred,
             "ALLOW_SELF_RESTART": str(self.self_restart_enabled).lower(),
         }
-        fd, temp_path = tempfile.mkstemp(
-            prefix="config.env.", dir=self.data_dir, text=True
-        )
         try:
-            with os.fdopen(fd, "w", encoding="utf-8") as stream:
-                for key, item in values.items():
-                    stream.write(f"{key}={_quote_env(item)}\n")
-                stream.flush()
-                os.fsync(stream.fileno())
-            os.chmod(temp_path, 0o600)
-            os.replace(temp_path, self.config_file)
-        finally:
-            if os.path.exists(temp_path):
-                os.unlink(temp_path)
+            fd, temp_path = tempfile.mkstemp(
+                prefix="config.env.", dir=self.data_dir, text=True
+            )
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                    for key, item in values.items():
+                        stream.write(f"{key}={_quote_env(item)}\n")
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.chmod(temp_path, 0o600)
+                os.replace(temp_path, self.config_file)
+            finally:
+                if os.path.exists(temp_path):
+                    os.unlink(temp_path)
+        except PermissionError as exc:
+            raise ConfigPersistenceError(
+                "CONFIG_PERMISSION_DENIED",
+                "配置目录不可写，请检查/app/data挂载目录权限",
+            ) from exc
+        except OSError as exc:
+            if exc.errno == errno.EROFS:
+                code = "CONFIG_READ_ONLY_FILESYSTEM"
+                message = "配置目录为只读挂载"
+            elif exc.errno == errno.ENOSPC:
+                code = "CONFIG_DISK_FULL"
+                message = "配置目录磁盘空间不足"
+            else:
+                code = "CONFIG_WRITE_FAILED"
+                message = "配置文件写入失败"
+            raise ConfigPersistenceError(code, message) from exc
 
 
 def validate_sqlite_filename(value: str) -> str:

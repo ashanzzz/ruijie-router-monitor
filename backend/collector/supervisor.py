@@ -9,10 +9,9 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Awaitable, Callable
 
-from playwright.async_api import Browser, BrowserContext, Page, Playwright, async_playwright
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
-from backend.collector.models import CollectorStatus, RouterSnapshot
+from backend.collector.models import RouterRuntimeState, RouterSnapshot
 from backend.collector.parsers import parse_clients, parse_topology
 from backend.config import settings
 from backend.time_utils import utcnow
@@ -54,7 +53,11 @@ class RuijieCollectorSupervisor:
         self.host = (host or settings.router_host).rstrip("/")
         self.password = password if password is not None else settings.router_password
         self.poll_interval = poll_interval or settings.poll_interval
-        self.status = CollectorStatus()
+        self.runtime = RouterRuntimeState(
+            configured_host=self.host,
+            active_host=self.host,
+        )
+        self._lifecycle_lock = asyncio.Lock()
         self._task: asyncio.Task | None = None
         self._stop = asyncio.Event()
         self._playwright: Playwright | None = None
@@ -72,20 +75,24 @@ class RuijieCollectorSupervisor:
         self._sequence = 0
 
     async def start(self) -> None:
-        if self._task and not self._task.done():
-            return
-        self._stop.clear()
-        self._task = asyncio.create_task(self._run(), name="ruijie-collector")
+        async with self._lifecycle_lock:
+            if self._task and not self._task.done():
+                return
+            self._stop.clear()
+            self._task = asyncio.create_task(self._run(), name="ruijie-collector")
 
     async def stop(self) -> None:
-        self._stop.set()
-        if self._task:
-            self._task.cancel()
-            try:
-                await self._task
-            except asyncio.CancelledError:
-                pass
-        await self._close_browser()
+        async with self._lifecycle_lock:
+            self._stop.set()
+            if self._task:
+                self._task.cancel()
+                try:
+                    await self._task
+                except asyncio.CancelledError:
+                    pass
+            await self._close_browser()
+            self.runtime.state = "stopped"
+            self.runtime.authenticated = False
 
     async def restart(self) -> None:
         await self.stop()
@@ -97,13 +104,33 @@ class RuijieCollectorSupervisor:
         await self.start()
 
     async def reconfigure(
-        self, host: str, username: str, password: str, poll_interval: int
-    ) -> None:
-        self.host = host.rstrip("/")
-        self.username = username
-        self.password = password
-        self.poll_interval = poll_interval
-        await self.restart()
+        self, host: str, password: str, poll_interval: int, config_revision: int
+    ) -> RouterRuntimeState:
+        async with self._lifecycle_lock:
+            self._stop.set()
+            if self._task:
+                self._task.cancel()
+                try:
+                    await self._task
+                except asyncio.CancelledError:
+                    pass
+            await self._close_browser()
+            
+            self.host = host.rstrip("/")
+            self.password = password
+            self.poll_interval = poll_interval
+            self.runtime.configured_host = self.host
+            self.runtime.configured_revision = config_revision
+            
+            self._session_id = uuid.uuid4().hex
+            self._sequence = 0
+            self._templates.clear()
+            self._latest_topology = None
+            self._latest_clients = None
+            
+            self._stop.clear()
+            self._task = asyncio.create_task(self._run(), name="ruijie-collector")
+        return self.runtime
 
     async def _close_browser(self) -> None:
         if self._context:
@@ -119,36 +146,51 @@ class RuijieCollectorSupervisor:
 
     async def _run(self) -> None:
         if not self.password:
-            self.status.state = "not_configured"
+            self.runtime.state = "not_configured"
             return
         delay = 3
         while not self._stop.is_set():
             try:
-                self.status.state = "starting"
+                self.runtime.state = "starting"
+                self.runtime.restart_required = False
                 await self._ensure_logged_in()
                 snapshot = await self.collect_once()
                 await self.on_snapshot(snapshot)
-                self.status.state = "ready"
-                self.status.collection_source = snapshot.source
-                self.status.last_snapshot_at = snapshot.collected_at
-                self.status.client_count = len(snapshot.devices)
-                self.status.node_count = len(snapshot.nodes)
-                self.status.consecutive_failures = 0
-                self.status.last_error_code = None
-                self.status.last_error_message = None
+                
+                self.runtime.state = "ready"
+                self.runtime.active_revision = self.runtime.configured_revision
+                self.runtime.active_host = self.host
+                self.runtime.collection_source = snapshot.source
+                self.runtime.last_snapshot_at = snapshot.collected_at
+                self.runtime.last_database_commit_at = snapshot.collected_at
+                self.runtime.last_client_count = len(snapshot.devices)
+                self.runtime.last_node_count = len(snapshot.nodes)
+                self.runtime.last_error_code = None
+                self.runtime.last_error_message = None
+                self.runtime.last_error_stage = None
                 delay = 3
-                await asyncio.wait_for(
-                    self._stop.wait(), timeout=max(3, self.poll_interval)
-                )
-            except asyncio.TimeoutError:
-                continue
+                
+                # Check for stale timeout
+                try:
+                    await asyncio.wait_for(
+                        self._stop.wait(), timeout=max(3, self.poll_interval)
+                    )
+                except asyncio.TimeoutError:
+                    if self.runtime.last_snapshot_at and (utcnow() - self.runtime.last_snapshot_at).total_seconds() > max(self.poll_interval * 3, 30):
+                        self.runtime.state = "stale"
+                    continue
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                self.status.state = "stale"
-                self.status.consecutive_failures += 1
-                self.status.last_error_code = getattr(exc, "code", "COLLECTOR_ERROR")
-                self.status.last_error_message = str(exc)[:300]
+                self.runtime.state = "stale"
+                self.runtime.authenticated = False
+                self.runtime.last_error_code = getattr(exc, "code", "COLLECTOR_ERROR")
+                self.runtime.last_error_message = str(exc)[:300]
+                if isinstance(exc, AuthenticationError):
+                    self.runtime.state = "auth_failed"
+                    self.runtime.last_error_stage = "authentication"
+                elif isinstance(exc, CapabilityError):
+                    self.runtime.last_error_stage = "capability_discovery"
                 logger.exception("Collector iteration failed")
                 await self._close_browser()
                 try:
@@ -160,7 +202,8 @@ class RuijieCollectorSupervisor:
     async def _ensure_logged_in(self) -> None:
         if self._page and not self._page.is_closed():
             return
-        self.status.state = "authenticating"
+        self.runtime.state = "authenticating"
+        from playwright.async_api import async_playwright
         self._playwright = await async_playwright().start()
         self._browser = await self._playwright.chromium.launch(headless=True)
         self._context = await self._browser.new_context(
@@ -214,9 +257,10 @@ class RuijieCollectorSupervisor:
         if await password.is_visible():
             raise AuthenticationError(f"登录后密码框仍可见，认证未成功. error={err_text}, url={self._page.url}")
         
-        self.status.last_login_at = utcnow()
-        self.status.profile_id = f"ruijie-eweb-{auth_mode}"
-        self.status.state = "discovering"
+        self.runtime.last_auth_at = utcnow()
+        self.runtime.authenticated = True
+        self.runtime.profile_id = f"ruijie-eweb-{auth_mode}"
+        self.runtime.state = "discovering"
 
     async def _handle_response(self, response) -> None:
         request = response.request
@@ -355,7 +399,7 @@ class RuijieCollectorSupervisor:
                 "ok": True,
                 "auth_mode": (
                     "username_password"
-                    if self.status.profile_id and "username_password" in self.status.profile_id
+                    if self.runtime.profile_id and "username_password" in self.runtime.profile_id
                     else "password_only"
                 ),
             },
@@ -368,5 +412,5 @@ class RuijieCollectorSupervisor:
                 "clients": len(snapshot.devices),
                 "network_nodes": len(snapshot.nodes),
             },
-            "profile_id": self.status.profile_id,
+            "profile_id": self.runtime.profile_id,
         }

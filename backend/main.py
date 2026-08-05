@@ -7,12 +7,17 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
+import hashlib
+import secrets
+import uuid
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator, model_validator
 from sqlalchemy import URL, func, select
 from sqlalchemy.orm import Session
+
+from dataclasses import replace
 
 from backend.auth import (
     auth_status,
@@ -26,7 +31,7 @@ from backend.auth import (
     setup_admin,
 )
 from backend.collector import RuijieCollectorSupervisor
-from backend.config import Settings, settings, validate_sqlite_filename
+from backend.config import Settings, settings, validate_sqlite_filename, ConfigPersistenceError
 from backend.db import (
     ClientTrafficSample,
     ConnectionHistory,
@@ -74,6 +79,7 @@ class WebSocketManager:
 
 ws_manager = WebSocketManager()
 collector: RuijieCollectorSupervisor | None = None
+probe_tokens: dict[str, dict] = {}
 
 
 def iso(value: datetime | None) -> str | None:
@@ -336,7 +342,7 @@ def bootstrap(_=Depends(require_admin)) -> dict[str, Any]:
             nodes = serialize_nodes(db)
     return {
         "status": "success",
-        "collector": collector.status.as_dict() if collector else {"state": "stopped"},
+        "collector": collector.runtime.as_dict() if collector else {"state": "stopped"},
         "database": database_status_payload(),
         "clients": clients,
         "network_nodes": nodes,
@@ -367,7 +373,29 @@ def database_status(_=Depends(require_admin)) -> dict[str, Any]:
 
 @app.get("/api/diagnostics/collector")
 def collector_diagnostics(_=Depends(require_admin)) -> dict[str, Any]:
-    return collector.status.as_dict() if collector else {"state": "stopped"}
+    return collector.runtime.as_dict() if collector else {"state": "stopped"}
+
+@app.get("/api/router/status")
+def router_status(_=Depends(require_admin)) -> dict[str, Any]:
+    return {
+        "status": "success",
+        "router": collector.runtime.as_dict() if collector else {"state": "stopped"}
+    }
+
+@app.get("/api/config/storage-status")
+def storage_status(_=Depends(require_admin)) -> dict[str, Any]:
+    path = settings.config_file
+    parent = path.parent
+    return {
+        "status": "success",
+        "path": str(path),
+        "directory_exists": parent.exists(),
+        "directory_writable": os.access(parent, os.W_OK) if parent.exists() else False,
+        "file_exists": path.exists(),
+        "file_writable": os.access(path, os.W_OK) if path.exists() else True,
+        "uid": os.getuid(),
+        "gid": os.getgid(),
+    }
 
 
 # ---------- Clients ----------
@@ -747,7 +775,17 @@ async def discover_router(
         poll_interval=settings.poll_interval,
     )
     try:
-        return await temporary.discover()
+        result = await temporary.discover()
+        
+        probe_token = secrets.token_urlsafe(32)
+        probe_hash = hashlib.sha256(probe_token.encode()).hexdigest()
+        probe_tokens[probe_hash] = {
+            "host": payload.host.rstrip("/"),
+            "password": password,
+            "expires_at": utcnow() + timedelta(minutes=15)
+        }
+        result["probe_token"] = probe_token
+        return result
     except Exception as exc:
         logger.exception("Router discovery failed")
         raise HTTPException(
@@ -822,6 +860,14 @@ async def patch_config(
 ) -> dict[str, Any]:
     needs_restart = False
     
+    # Clean up expired probe tokens
+    now = utcnow()
+    expired = [k for k, v in probe_tokens.items() if v["expires_at"] < now]
+    for k in expired:
+        probe_tokens.pop(k, None)
+    
+    candidate = replace(settings)
+
     if "database" in payload:
         db_payload = payload.pop("database")
         db_req = DatabaseRequest(**db_payload)
@@ -831,36 +877,75 @@ async def patch_config(
         elif new_db_password is not None and new_db_password != settings.db_password:
             needs_restart = True
             
-        settings.database_type = db_req.type
+        candidate.database_type = db_req.type
         if db_req.type == "sqlite":
-            settings.sqlite_filename = validate_sqlite_filename(db_req.filename or "monitor.db")
+            candidate.sqlite_filename = validate_sqlite_filename(db_req.filename or "monitor.db")
         else:
-            settings.db_host = db_req.host or ""
-            settings.db_port = db_req.port or 5432
-            settings.db_name = db_req.database or ""
-            settings.db_user = db_req.user or ""
+            candidate.db_host = db_req.host or ""
+            candidate.db_port = db_req.port or 5432
+            candidate.db_name = db_req.database or ""
+            candidate.db_user = db_req.user or ""
             if new_db_password is not None:
-                settings.db_password = new_db_password
-            settings.db_sslmode = db_req.sslmode or "disable"
+                candidate.db_password = new_db_password
+            candidate.db_sslmode = db_req.sslmode or "disable"
 
+    reconfigure_router = False
     if "router_host" in payload:
-        settings.router_host = payload["router_host"].rstrip("/")
+        candidate.router_host = payload["router_host"].rstrip("/")
+        reconfigure_router = True
     if "router_password" in payload and payload["router_password"] is not None:
-        settings.router_password = payload["router_password"]
+        candidate.router_password = payload["router_password"]
+        reconfigure_router = True
     if "poll_interval" in payload:
-        settings.poll_interval = payload["poll_interval"]
-    if "telegram_enabled" in payload:
-        settings.telegram_enabled = payload["telegram_enabled"]
-    if "telegram_token" in payload and payload["telegram_token"] is not None:
-        settings.telegram_token = payload["telegram_token"]
-    if "telegram_chat_id" in payload:
-        settings.telegram_chat_id = payload["telegram_chat_id"]
-    if "retention_days_normal" in payload:
-        settings.retention_days_normal = payload["retention_days_normal"]
-    if "retention_days_starred" in payload:
-        settings.retention_days_starred = payload["retention_days_starred"]
+        candidate.poll_interval = payload["poll_interval"]
+        reconfigure_router = True
+        
+    if reconfigure_router:
+        if "router_probe_token" not in payload:
+            raise HTTPException(422, "必须先成功测试路由器连接 (缺少 router_probe_token)")
+        token = payload["router_probe_token"]
+        probe_hash = hashlib.sha256(token.encode()).hexdigest()
+        if probe_hash not in probe_tokens:
+            raise HTTPException(422, "测试凭据已过期或无效，请重新测试路由器连接")
+        probe_data = probe_tokens[probe_hash]
+        if candidate.router_host != probe_data["host"] or candidate.router_password != probe_data["password"]:
+            raise HTTPException(422, "保存的配置与测试结果不匹配")
+        # Consume token
+        probe_tokens.pop(probe_hash, None)
 
-    settings.save()
+    if "telegram_enabled" in payload:
+        candidate.telegram_enabled = payload["telegram_enabled"]
+    if "telegram_token" in payload and payload["telegram_token"] is not None:
+        candidate.telegram_token = payload["telegram_token"]
+    if "telegram_chat_id" in payload:
+        candidate.telegram_chat_id = payload["telegram_chat_id"]
+    if "retention_days_normal" in payload:
+        candidate.retention_days_normal = payload["retention_days_normal"]
+    if "retention_days_starred" in payload:
+        candidate.retention_days_starred = payload["retention_days_starred"]
+
+    try:
+        candidate.save()
+    except ConfigPersistenceError as exc:
+        req_id = uuid.uuid4().hex
+        logger.exception("config save failed request_id=%s code=%s", req_id, exc.code)
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "code": exc.code,
+                "message": str(exc),
+                "request_id": req_id,
+            },
+        ) from exc
+        
+    # Apply to memory
+    for k, v in candidate.__dict__.items():
+        setattr(settings, k, v)
+        
+    if reconfigure_router and collector:
+        config_rev = getattr(collector.runtime, 'configured_revision', 0) + 1
+        await collector.reconfigure(settings.router_host, settings.router_password, settings.poll_interval, config_rev)
+
     return {"status": "success", "restart_required": needs_restart}
 
 
