@@ -89,10 +89,18 @@ def iso(value: datetime | None) -> str | None:
 def serialize_clients(db: Session) -> list[dict[str, Any]]:
     aliases = {item.mac: item.alias for item in db.scalars(select(DeviceAlias))}
     nodes = {item.node_id: item for item in db.scalars(select(NetworkNode))}
+    gateway_node = next((n for n in nodes.values() if n.node_type == "gateway"), None)
+    default_parent = (gateway_node.alias or gateway_node.name or "主网关") if gateway_node else "主网关"
+
     clients: list[dict[str, Any]] = []
     for item in db.scalars(select(Device).order_by(Device.is_online.desc(), Device.last_seen.desc())):
         alias = aliases.get(item.mac)
         parent = nodes.get(item.parent_node_id or "")
+        parent_name = (
+            (parent.alias or parent.name or parent.serial_number)
+            if parent
+            else (item.ap_name or default_parent)
+        )
         clients.append(
             {
                 "mac": item.mac,
@@ -102,12 +110,8 @@ def serialize_clients(db: Session) -> list[dict[str, Any]]:
                 "display_name": alias or (item.hostname if item.hostname and item.hostname != "*" else None) or item.ip or item.mac,
                 "ap_sn": item.ap_sn,
                 "ap_name": item.ap_name,
-                "parent_node_id": item.parent_node_id,
-                "parent_name": (
-                    (parent.alias or parent.name or parent.serial_number)
-                    if parent
-                    else item.ap_name
-                ),
+                "parent_node_id": item.parent_node_id or (gateway_node.node_id if gateway_node else None),
+                "parent_name": parent_name,
                 "ssid": item.ssid,
                 "rssi": item.rssi,
                 "is_online": bool(item.is_online),
