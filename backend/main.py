@@ -99,7 +99,7 @@ def serialize_clients(db: Session) -> list[dict[str, Any]]:
                 "ip": item.ip,
                 "hostname": item.hostname,
                 "alias": alias or "",
-                "display_name": alias or item.hostname or item.mac,
+                "display_name": alias or (item.hostname if item.hostname and item.hostname != "*" else None) or item.ip or item.mac,
                 "ap_sn": item.ap_sn,
                 "ap_name": item.ap_name,
                 "parent_node_id": item.parent_node_id,
