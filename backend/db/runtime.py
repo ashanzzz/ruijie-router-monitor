@@ -220,9 +220,9 @@ def verify_candidate(url: URL) -> dict[str, Any]:
                 ).scalar_one()
                 if probe_value != "ok":
                     raise RuntimeError("Data integrity check failed")
-                return {"database": row[0], "user": row[1]}
+                return {"database": row[0], "user": row[1], "read_write": True}
             else:
-                row = connection.execute(text("PRAGMA compile_options")).all()
+                sqlite_version = connection.execute(text("SELECT sqlite_version()" )).scalar_one()
                 connection.execute(
                     text(
                         "CREATE TEMP TABLE ruijie_monitor_probe "
@@ -237,7 +237,7 @@ def verify_candidate(url: URL) -> dict[str, Any]:
                 ).scalar_one()
                 if probe_value != "ok":
                     raise RuntimeError("Data integrity check failed")
-                return {"sqlite_version": row[0][0] if row else "unknown"}
+                return {"sqlite_version": sqlite_version, "read_write": True}
     finally:
         engine.dispose()
 

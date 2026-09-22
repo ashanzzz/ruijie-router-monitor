@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test and syntax checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install dependencies
+        run: python -m pip install -r requirements-dev.txt
+      - name: Compile Python
+        run: python -m compileall -q backend
+      - name: Run tests
+        run: pytest -q
+      - name: Check frontend syntax
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          source = Path('frontend/index.html').read_text(encoding='utf-8')
+          start = source.index('<script>') + len('<script>')
+          end = source.rindex('</script>')
+          Path('/tmp/frontend_check.js').write_text(source[start:end], encoding='utf-8')
+          PY
+          node --check /tmp/frontend_check.js
+
+  docker:
+    name: Build Docker image
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Build image
+        run: docker build --tag ruijie-router-monitor:${{ github.sha }} .

@@ -50,8 +50,8 @@ class Settings:
     db_password: str = ""
     db_sslmode: str = "disable"
     cookie_secure: bool = False
-    retention_days_normal: int = 30
-    retention_days_starred: int = 180
+    retention_days_normal: int = 1
+    retention_days_starred: int = 30
     self_restart_enabled: bool = True
 
     @classmethod
@@ -108,8 +108,8 @@ class Settings:
             db_password=value("DB_PASSWORD", ""),
             db_sslmode=value("DB_SSLMODE", "disable"),
             cookie_secure=_as_bool(value("COOKIE_SECURE", "false")),
-            retention_days_normal=max(1, min(3650, int(value("RETENTION_DAYS_NORMAL", "30")))),
-            retention_days_starred=max(1, min(3650, int(value("RETENTION_DAYS_STARRED", "180")))),
+            retention_days_normal=max(1, min(3650, int(value("RETENTION_DAYS_NORMAL", "1")))),
+            retention_days_starred=max(1, min(3650, int(value("RETENTION_DAYS_STARRED", "30")))),
             self_restart_enabled=_as_bool(value("ALLOW_SELF_RESTART", "true"), True),
         )
 

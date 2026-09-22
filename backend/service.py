@@ -64,7 +64,7 @@ _last_cleanup_monotonic = 0.0
 
 
 def cleanup_expired_history(db, now: datetime) -> None:
-    """Delete time-series/history rows while retaining device identities and stars."""
+    """Delete old telemetry and purge clients absent for one year."""
     normal_cutoff = now - timedelta(days=settings.retention_days_normal)
     starred_cutoff = now - timedelta(days=settings.retention_days_starred)
     starred_macs = select(Device.mac).where(Device.is_starred.is_(True))
@@ -108,6 +108,39 @@ def cleanup_expired_history(db, now: datetime) -> None:
     db.execute(
         delete(ProcessedSnapshot).where(ProcessedSnapshot.collected_at < normal_cutoff)
     )
+
+    purge_stale_clients(db, now)
+
+
+_CLIENT_IDENTITY_RETENTION_DAYS = 365
+
+
+def purge_stale_clients(db, now: datetime) -> int:
+    """Remove offline clients with no observation for one year."""
+    cutoff = now - timedelta(days=_CLIENT_IDENTITY_RETENTION_DAYS)
+    stale_clients = list(
+        db.scalars(
+            select(Device).where(
+                Device.is_online.is_(False),
+                Device.last_seen < cutoff,
+                or_(
+                    Device.last_offline_at.is_(None),
+                    Device.last_offline_at < cutoff,
+                ),
+            )
+        )
+    )
+    for device in stale_clients:
+        session_ids = select(ConnectionHistory.id).where(
+            ConnectionHistory.mac == device.mac
+        )
+        db.execute(delete(RoamingSegment).where(RoamingSegment.session_id.in_(session_ids)))
+        db.execute(delete(ConnectionHistory).where(ConnectionHistory.mac == device.mac))
+        db.execute(delete(ClientTrafficSample).where(ClientTrafficSample.mac == device.mac))
+        db.execute(delete(EventLog).where(EventLog.mac == device.mac))
+        db.execute(delete(DeviceAlias).where(DeviceAlias.mac == device.mac))
+        db.delete(device)
+    return len(stale_clients)
 
 
 def process_snapshot(snapshot: RouterSnapshot) -> list[str]:
@@ -297,9 +330,11 @@ def process_snapshot(snapshot: RouterSnapshot) -> list[str]:
                     .order_by(ClientTrafficSample.sampled_at.desc())
                     .limit(1)
                 ).first()
+                sample_interval = 10 if device.is_starred else 60
                 if (
                     latest_sample is None
-                    or snapshot.collected_at - latest_sample.sampled_at >= timedelta(seconds=60)
+                    or snapshot.collected_at - latest_sample.sampled_at
+                    >= timedelta(seconds=sample_interval)
                 ):
                     db.add(
                         ClientTrafficSample(

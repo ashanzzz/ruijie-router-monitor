@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session
 
 from dataclasses import replace
 
+from backend.analytics import journey_analytics, traffic_analytics
 from backend.auth import (
     auth_status,
     authenticate_websocket,
@@ -33,7 +34,6 @@ from backend.auth import (
 from backend.collector import RuijieCollectorSupervisor
 from backend.config import Settings, settings, validate_sqlite_filename, ConfigPersistenceError
 from backend.db import (
-    ClientTrafficSample,
     ConnectionHistory,
     Device,
     DeviceAlias,
@@ -209,7 +209,7 @@ async def lifespan(app: FastAPI):
         db_runtime.dispose()
 
 
-app = FastAPI(title=settings.app_name, version="2.1.0", lifespan=lifespan)
+app = FastAPI(title=settings.app_name, version="2.3.0", lifespan=lifespan)
 
 
 # ---------- Request models ----------
@@ -264,8 +264,8 @@ class ConfigRequest(BaseModel):
     telegram_enabled: bool = False
     telegram_token: str | None = Field(default=None, max_length=256)
     telegram_chat_id: str = Field(default="", max_length=128)
-    retention_days_normal: int = Field(default=30, ge=1, le=3650)
-    retention_days_starred: int = Field(default=180, ge=1, le=3650)
+    retention_days_normal: int = Field(default=1, ge=1, le=3650)
+    retention_days_starred: int = Field(default=30, ge=1, le=3650)
     database: DatabaseRequest
 
     @field_validator("router_host")
@@ -441,6 +441,14 @@ def client_detail(mac: str, db: Session = Depends(get_db), _=Depends(require_adm
         if current_session
         else None
     )
+    item["monitoring_policy"] = {
+        "retention_days": (
+            settings.retention_days_starred
+            if item["is_starred"]
+            else settings.retention_days_normal
+        ),
+        "sample_interval_seconds": 10 if item["is_starred"] else 60,
+    }
     return {"status": "success", "client": item}
 
 
@@ -493,13 +501,20 @@ def client_locations(
             .limit(limit)
         )
     )
+    node_names = {
+        item.node_id: item.alias or item.name or item.serial_number or item.node_id
+        for item in db.scalars(select(NetworkNode))
+    }
     return {
         "status": "success",
         "locations": [
             {
                 "session_id": session.id,
                 "parent_node_id": segment.parent_node_id,
-                "parent_name": segment.parent_name_snapshot,
+                "parent_name": (
+                    node_names.get(segment.parent_node_id or "")
+                    or segment.parent_name_snapshot
+                ),
                 "entered_at": iso(segment.entered_at),
                 "left_at": iso(segment.left_at),
             }
@@ -511,35 +526,35 @@ def client_locations(
 @app.get("/api/clients/{mac}/traffic")
 def client_traffic(
     mac: str,
-    range: Literal["2h", "24h", "7d", "30d"] = "24h",
+    range: Literal["1m", "10m", "1h", "2h", "24h", "7d", "30d"] = "24h",
     db: Session = Depends(get_db),
     _=Depends(require_admin),
 ) -> dict:
-    duration = {"2h": timedelta(hours=2), "24h": timedelta(days=1), "7d": timedelta(days=7), "30d": timedelta(days=30)}[range]
-    since = utcnow() - duration
-    rows = list(
-        db.scalars(
-            select(ClientTrafficSample)
-            .where(
-                ClientTrafficSample.mac == mac.upper(),
-                ClientTrafficSample.sampled_at >= since,
-            )
-            .order_by(ClientTrafficSample.sampled_at)
+    try:
+        analytics = traffic_analytics(
+            db,
+            mac,
+            range,
+            normal_retention_days=settings.retention_days_normal,
+            starred_retention_days=settings.retention_days_starred,
         )
-    )
-    return {
-        "status": "success",
-        "samples": [
-            {
-                "sampled_at": iso(item.sampled_at),
-                "rx_rate_kbps": item.rx_rate_kbps,
-                "tx_rate_kbps": item.tx_rate_kbps,
-                "parent_node_id": item.parent_node_id,
-                "rssi": item.rssi,
-            }
-            for item in rows
-        ],
-    }
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    return {"status": "success", **analytics}
+
+
+@app.get("/api/clients/{mac}/journey")
+def client_journey(
+    mac: str,
+    range: Literal["24h", "7d", "30d"] = "24h",
+    db: Session = Depends(get_db),
+    _=Depends(require_admin),
+) -> dict:
+    try:
+        analytics = journey_analytics(db, mac, range)
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    return {"status": "success", **analytics}
 
 
 @app.get("/api/clients/{mac}/events")
@@ -572,7 +587,16 @@ def star_client(
         raise HTTPException(404, "客户端不存在")
     device.is_starred = payload.is_starred
     db.commit()
-    return {"status": "success", "is_starred": device.is_starred}
+    return {
+        "status": "success",
+        "is_starred": device.is_starred,
+        "retention_days": (
+            settings.retention_days_starred
+            if device.is_starred
+            else settings.retention_days_normal
+        ),
+        "sample_interval_seconds": 10 if device.is_starred else 60,
+    }
 
 
 @app.post("/api/clients/{mac}/alias")

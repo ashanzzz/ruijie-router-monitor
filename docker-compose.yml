@@ -5,7 +5,6 @@ services:
     restart: unless-stopped
     init: true
     stop_grace_period: 30s
-    shm_size: "512mb"
     environment:
       ALLOW_SELF_RESTART: "true"
     ports:

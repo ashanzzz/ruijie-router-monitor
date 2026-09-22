@@ -1,3 +1,36 @@
+# Change Log
+
+## 2026-09-22 - 2.3 path and telemetry analytics
+
+- Added AP location naming in the network device drawer.
+- Added client drill-down from a network device to its clients.
+- Added one-click client follow and unfollow in the client drawer.
+- Changed default retention to 24 hours for normal clients and 30 days for followed clients.
+- Changed sampling to about 60 seconds for normal clients and 10 seconds for followed clients.
+- Added traffic and RSSI line charts with 1m, 10m, 1h, 2h, 24h, 7d, and 30d ranges.
+- Added activity-path timelines with online time, offline gaps, AP locations, and confidence labels.
+- Added conservative short-gap inference. It does not claim a specific personal activity.
+- Added compact and relaxed display-density controls.
+- Added analytics regression tests.
+- Added a one-year inactive-client purge that removes the client, alias, telemetry, sessions, roaming segments, and events.
+
+## 2026-09-22 - 2.2 direct API collector
+
+- Replaced the Playwright runtime collector with an `httpx` async client.
+- Reversed the current eWeb AES login flow and both request signatures.
+- Corrected API authentication to use `sid` instead of the page `token`.
+- Added HTTP connection reuse and concurrent topology and client requests.
+- Added one automatic re-login after an expired API session.
+- Removed Chromium from the Docker image.
+- Changed the base image to Python 3.12 slim.
+- Added PyCryptodome for the eWeb AES-256-CBC login value.
+- Added Docker exclusions for local secrets, databases, tests, and captures.
+- Removed the obsolete 512 MB shared-memory allocation from Compose.
+- Added tests for the AES vector, SID use, and request signatures.
+- Fixed database verification responses to include `read_write: true`.
+- Fixed SQLite verification to report `sqlite_version()`.
+
+---
 # Milestone v1.1.0 Release Notes
 
 发布日期: 2026-08-05
