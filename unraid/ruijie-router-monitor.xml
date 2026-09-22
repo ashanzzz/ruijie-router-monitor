@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Container version="2">
+  <Name>ruijie-router-monitor</Name>
+  <Repository>ghcr.io/ashanzzz/ruijie-router-monitor:latest</Repository>
+  <Registry>https://github.com/ashanzzz/ruijie-router-monitor/pkgs/container/ruijie-router-monitor</Registry>
+  <Network>bridge</Network>
+  <MyIP />
+  <Shell>sh</Shell>
+  <Privileged>false</Privileged>
+  <Support>https://github.com/ashanzzz/ruijie-router-monitor/issues</Support>
+  <Project>https://github.com/ashanzzz/ruijie-router-monitor</Project>
+  <ReadMe>https://github.com/ashanzzz/ruijie-router-monitor#readme</ReadMe>
+  <Overview>Local Ruijie/Reyee eWeb network monitor. Uses direct HTTP API collection, stores telemetry in appdata, and provides a browser dashboard for clients, AP locations, traffic, RSSI, and activity paths.</Overview>
+  <Category>Network:Monitoring Tools:Utilities</Category>
+  <WebUI>http://[IP]:[PORT:8080]</WebUI>
+  <TemplateURL>https://raw.githubusercontent.com/ashanzzz/ruijie-router-monitor/master/unraid/ruijie-router-monitor.xml</TemplateURL>
+  <Icon>https://github.com/ashanzzz.png</Icon>
+  <ExtraParams>--init --restart unless-stopped --user 99:100 --log-opt max-size=10m --log-opt max-file=3</ExtraParams>
+  <PostArgs />
+  <CPUset />
+  <DateInstalled>__PRESERVE_DATE_INSTALLED__</DateInstalled>
+  <DonateText />
+  <DonateLink />
+  <Requires>The appdata directory must be writable by Unraid's nobody:users account. Configure router credentials from the first-run Web UI instead of putting secrets in this template.</Requires>
+  <Config Name="Web UI port" Target="8080" Default="8080" Mode="tcp" Description="Host port for the monitor web UI." Type="Port" Display="always" Required="true" Mask="false">8080</Config>
+  <Config Name="Appdata" Target="/app/data" Default="/mnt/user/appdata/ruijie-router-monitor" Mode="rw" Description="Persistent configuration, administrator sessions, SQLite database, telemetry, and retained client history." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/ruijie-router-monitor</Config>
+  <Config Name="Timezone" Target="TZ" Default="Asia/Shanghai" Mode="" Description="Container timezone used for operational logs." Type="Variable" Display="always" Required="true" Mask="false">Asia/Shanghai</Config>
+  <Config Name="Allow in-app restart" Target="ALLOW_SELF_RESTART" Default="true" Mode="" Description="Allows the dashboard restart button to exit the process. Docker restart policy starts it again." Type="Variable" Display="advanced" Required="true" Mask="false">true</Config>
+  <Config Name="Secure cookies" Target="COOKIE_SECURE" Default="false" Mode="" Description="Keep false for direct HTTP Web UI. Set true only behind HTTPS reverse proxy." Type="Variable" Display="advanced" Required="false" Mask="false">false</Config>
+</Container>

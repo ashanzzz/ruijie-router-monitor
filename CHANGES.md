@@ -179,3 +179,9 @@ docker exec -it ruijie-router-monitor python -m backend.cli auth reset-password
 - 尚未引入完整 Alembic revision 链；旧数据库仅执行安全的增量加列兼容。
 - 锐捷 eWeb 为私有接口，不同固件可能更换菜单、字段和请求结构，仍需在目标路由器上验证首次接口学习。
 - RSSI只能作为相对信号强弱参考，不能直接换算成准确物理距离。
+
+## 2026-09-22 - Unraid deployment
+
+- Added an Unraid Docker template for the GHCR image.
+- Added GitHub Actions publishing for `latest` and commit-tagged GHCR images.
+- Added Unraid deployment instructions without embedded secrets.

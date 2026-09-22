@@ -119,3 +119,25 @@ pytest -q
 固件升级后，先测试路由器连接。接口变化时，需要更新适配器。
 
 本项目只支持用户有权管理的局域网设备。
+
+## Unraid 部署
+
+模板文件位于：
+
+```text
+unraid/ruijie-router-monitor.xml
+```
+
+镜像地址：
+
+```text
+ghcr.io/ashanzzz/ruijie-router-monitor:latest
+```
+
+1. 在 Unraid 的 Docker 页面打开“添加容器”。
+2. 导入模板文件，或把模板复制到 Unraid 用户模板目录。
+3. 保持 Appdata 映射到 `/mnt/user/appdata/ruijie-router-monitor`。
+4. 确保该目录可由 `nobody:users` 写入。
+5. 启动容器后，从 Web UI 完成管理员和路由器设置。
+
+模板不会保存路由器密码或 Telegram Token。
