@@ -21,7 +21,7 @@ from backend.db import (
     RoamingSegment,
     db_runtime,
 )
-from backend.main import app, database_status_payload
+from backend.main import app, database_status_payload, serialize_favorite_activity
 from backend.db.runtime import verify_candidate
 from backend.service import cleanup_expired_history, process_snapshot
 from backend.time_utils import utcnow
@@ -183,6 +183,122 @@ def test_snapshot_persists_rssi_and_incremental_session_traffic() -> None:
         ).one()
         assert session.session_rx_bytes == 500
         assert session.session_tx_bytes == 400
+
+
+def test_one_minute_absence_confirms_offline_and_favorite_activity_reports_move() -> None:
+    reset_business_database()
+    started_at = utcnow().replace(microsecond=0)
+    first_node = NetworkNodeObservation(
+        node_id="sn:AP-OFFICE",
+        serial_number="AP-OFFICE",
+        node_type="ap",
+        name="AP-OFFICE",
+        model="RG-EAP",
+        management_ip=None,
+        parent_node_id=None,
+    )
+    second_node = NetworkNodeObservation(
+        node_id="sn:AP-WORKSHOP",
+        serial_number="AP-WORKSHOP",
+        node_type="ap",
+        name="AP-WORKSHOP",
+        model="RG-EAP",
+        management_ip=None,
+        parent_node_id=None,
+    )
+    first_device = DeviceObservation(
+        mac="AA:BB:CC:DD:EE:09",
+        ip="192.168.1.9",
+        hostname="followed-client",
+        ap_sn="AP-OFFICE",
+        ap_name="3楼办公室",
+        parent_node_id="sn:AP-OFFICE",
+        ssid="Office",
+        rssi=-55,
+        rx_counter_bytes=0,
+        tx_counter_bytes=0,
+        rx_rate_kbps=0,
+        tx_rate_kbps=0,
+        usage_state="空闲",
+    )
+    process_snapshot(
+        RouterSnapshot(
+            snapshot_id="offline-grace-1",
+            collected_at=started_at,
+            source="test",
+            complete=True,
+            devices=(first_device,),
+            nodes=(first_node, second_node),
+        )
+    )
+    moved_device = DeviceObservation(
+        **{
+            **first_device.__dict__,
+            "ap_sn": "AP-WORKSHOP",
+            "ap_name": "车间办公室",
+            "parent_node_id": "sn:AP-WORKSHOP",
+        }
+    )
+    with db_runtime.session() as db:
+        with db.begin():
+            db.get(NetworkNode, first_node.node_id).alias = "3楼办公室"
+            db.get(NetworkNode, second_node.node_id).alias = "车间办公室"
+
+    process_snapshot(
+        RouterSnapshot(
+            snapshot_id="offline-grace-2",
+            collected_at=started_at + timedelta(seconds=10),
+            source="test",
+            complete=True,
+            devices=(moved_device,),
+            nodes=(first_node, second_node),
+        )
+    )
+    with db_runtime.session() as db:
+        with db.begin():
+            db.get(Device, first_device.mac).is_starred = True
+
+    process_snapshot(
+        RouterSnapshot(
+            snapshot_id="offline-grace-3",
+            collected_at=started_at + timedelta(seconds=40),
+            source="test",
+            complete=True,
+            devices=(),
+            nodes=(first_node, second_node),
+        )
+    )
+    with db_runtime.session() as db:
+        device = db.get(Device, first_device.mac)
+        assert device is not None and device.is_online is True
+        activity = serialize_favorite_activity(db)
+        assert activity[0]["status"] == "moved"
+        assert "从 3楼办公室 切换到 车间办公室" in activity[0]["change_message"]
+
+    process_snapshot(
+        RouterSnapshot(
+            snapshot_id="offline-grace-4",
+            collected_at=started_at + timedelta(seconds=71),
+            source="test",
+            complete=True,
+            devices=(),
+            nodes=(first_node, second_node),
+        )
+    )
+    with db_runtime.session() as db:
+        device = db.get(Device, first_device.mac)
+        assert device is not None and device.is_online is False
+        assert device.last_offline_at == started_at + timedelta(seconds=70)
+        session = db.scalars(
+            select(ConnectionHistory).where(ConnectionHistory.mac == first_device.mac)
+        ).one()
+        assert session.session_end == started_at + timedelta(seconds=70)
+        latest_event = db.scalars(
+            select(EventLog)
+            .where(EventLog.mac == first_device.mac, EventLog.event_type == "OFFLINE")
+            .order_by(EventLog.id.desc())
+        ).one()
+        assert "超过 1 分钟" in latest_event.message
 
 
 def test_retention_uses_longer_window_for_starred_clients_without_deleting_identity() -> None:

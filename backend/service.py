@@ -45,6 +45,11 @@ def display_name(db, device: Device) -> str:
     return (alias.alias if alias else None) or device.hostname or device.mac
 
 
+def node_location_name(db, node_id: str | None, fallback: str | None) -> str:
+    node = db.get(NetworkNode, node_id) if node_id else None
+    return (node.alias if node else None) or (node.name if node else None) or fallback or "未知位置"
+
+
 def event(db, *, mac: str | None, node_id: str | None, name: str | None, ip: str | None, kind: str, message: str) -> str:
     db.add(
         EventLog(
@@ -58,6 +63,8 @@ def event(db, *, mac: str | None, node_id: str | None, name: str | None, ip: str
     )
     return message
 
+
+_OFFLINE_CONFIRMATION_SECONDS = 60
 
 _CLEANUP_INTERVAL_SECONDS = 6 * 60 * 60
 _last_cleanup_monotonic = 0.0
@@ -183,6 +190,11 @@ def process_snapshot(snapshot: RouterSnapshot) -> list[str]:
                 is_new = device is None
                 was_online = bool(device.is_online) if device is not None else False
                 old_parent = device.parent_node_id if device is not None else None
+                old_parent_name = node_location_name(
+                    db,
+                    old_parent,
+                    device.ap_name if device is not None else None,
+                )
                 if device is None:
                     device = Device(
                         mac=item.mac,
@@ -220,6 +232,11 @@ def process_snapshot(snapshot: RouterSnapshot) -> list[str]:
                 device.rx_counter_bytes = item.rx_counter_bytes
                 device.tx_counter_bytes = item.tx_counter_bytes
                 device.usage_state = traffic_state(rx_rate_kbps, tx_rate_kbps)
+                current_location_name = node_location_name(
+                    db,
+                    item.parent_node_id,
+                    item.ap_name,
+                )
 
                 session = active_session(db, item.mac)
                 if session is None:
@@ -246,7 +263,7 @@ def process_snapshot(snapshot: RouterSnapshot) -> list[str]:
                         RoamingSegment(
                             session_id=session.id,
                             parent_node_id=item.parent_node_id,
-                            parent_name_snapshot=item.ap_name,
+                            parent_name_snapshot=current_location_name,
                             entered_at=snapshot.collected_at,
                         )
                     )
@@ -320,7 +337,10 @@ def process_snapshot(snapshot: RouterSnapshot) -> list[str]:
                             name=name,
                             ip=item.ip,
                             kind="LOCATION_CHANGE",
-                            message=f"{name} 切换到 {item.ap_name or '未知上级设备'}",
+                            message=(
+                                f"{name} 从 {old_parent_name or '未知位置'} "
+                                f"切换到 {current_location_name}"
+                            ),
                         )
                     )
 
@@ -353,14 +373,19 @@ def process_snapshot(snapshot: RouterSnapshot) -> list[str]:
                 for device in db.scalars(select(Device).where(Device.is_online.is_(True))):
                     if device.mac in observed_macs:
                         continue
+                    offline_at = device.last_seen + timedelta(
+                        seconds=_OFFLINE_CONFIRMATION_SECONDS
+                    )
+                    if snapshot.collected_at <= offline_at:
+                        continue
                     device.is_online = False
-                    device.last_offline_at = snapshot.collected_at
+                    device.last_offline_at = offline_at
                     device.rx_rate = 0
                     device.tx_rate = 0
                     device.usage_state = "离线"
                     session = active_session(db, device.mac)
                     if session:
-                        session.session_end = snapshot.collected_at
+                        session.session_end = offline_at
                         segment = db.scalars(
                             select(RoamingSegment)
                             .where(
@@ -371,7 +396,7 @@ def process_snapshot(snapshot: RouterSnapshot) -> list[str]:
                             .limit(1)
                         ).first()
                         if segment:
-                            segment.left_at = snapshot.collected_at
+                            segment.left_at = offline_at
                     name = display_name(db, device)
                     notifications.append(
                         event(
@@ -381,7 +406,9 @@ def process_snapshot(snapshot: RouterSnapshot) -> list[str]:
                             name=name,
                             ip=device.ip,
                             kind="OFFLINE",
-                            message=f"设备下线：{name}",
+                            message=(
+                                f"确认离线：{name}（超过 1 分钟未出现在采集结果中）"
+                            ),
                         )
                     )
 

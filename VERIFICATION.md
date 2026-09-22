@@ -14,7 +14,7 @@ git diff --check
 Result:
 
 ```text
-11 passed
+13 passed
 Python compilation passed
 Frontend JavaScript syntax passed
 Git whitespace check passed
@@ -36,6 +36,7 @@ The test set covers:
 - traffic and RSSI aggregation;
 - short same-AP dropout inference;
 - one-year inactive-client purge for client materials and history;
+- followed-client movement summaries and 60-second offline confirmation;
 
 ## Live device verification
 

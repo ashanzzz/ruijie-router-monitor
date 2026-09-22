@@ -1,5 +1,13 @@
 # Change Log
 
+## 2026-09-22 - 2.4 followed-client confirmation feed
+
+- Added a followed-client confirmation feed below the overview runtime status.
+- Shows confirmed online state, confirmed departure, and the latest specific location change.
+- Location-change messages now use AP location aliases when configured.
+- Added a 60-second offline confirmation grace period. A client that returns within one minute stays online and keeps the same session.
+- Added regression coverage for movement summaries and offline confirmation.
+
 ## 2026-09-22 - 2.3 path and telemetry analytics
 
 - Added AP location naming in the network device drawer.

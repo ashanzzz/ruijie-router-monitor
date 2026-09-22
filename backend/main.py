@@ -128,6 +128,67 @@ def serialize_clients(db: Session) -> list[dict[str, Any]]:
     return clients
 
 
+def serialize_favorite_activity(db: Session) -> list[dict[str, Any]]:
+    clients = [item for item in serialize_clients(db) if item["is_starred"]]
+    if not clients:
+        return []
+
+    starred_macs = [item["mac"] for item in clients]
+    recent_events = db.scalars(
+        select(EventLog)
+        .where(
+            EventLog.mac.in_(starred_macs),
+            EventLog.event_type.in_(["ONLINE", "OFFLINE", "LOCATION_CHANGE"]),
+        )
+        .order_by(EventLog.created_at.desc())
+    )
+    latest_events: dict[str, EventLog] = {}
+    for item in recent_events:
+        if item.mac and item.mac not in latest_events:
+            latest_events[item.mac] = item
+
+    activity: list[dict[str, Any]] = []
+    for client in clients:
+        latest = latest_events.get(client["mac"])
+        moved = bool(
+            client["is_online"]
+            and latest
+            and latest.event_type == "LOCATION_CHANGE"
+        )
+        if moved:
+            status = "moved"
+            title = "确认在线，位置已变化"
+        elif client["is_online"]:
+            status = "online"
+            title = "确认在线"
+        else:
+            status = "offline"
+            title = "确认离开"
+        activity.append(
+            {
+                "mac": client["mac"],
+                "display_name": client["display_name"],
+                "status": status,
+                "title": title,
+                "location": client["parent_name"],
+                "confirmed_at": (
+                    client["last_seen"] if client["is_online"] else client["last_offline_at"]
+                ),
+                "change_message": (
+                    latest.message if moved and latest is not None else None
+                ),
+                "change_at": latest.created_at.isoformat() + "Z" if moved and latest else None,
+            }
+        )
+    return sorted(
+        activity,
+        key=lambda item: (
+            {"moved": 0, "offline": 1, "online": 2}[item["status"]],
+            item["display_name"],
+        ),
+    )
+
+
 def serialize_nodes(db: Session) -> list[dict[str, Any]]:
     client_counts = dict(
         db.execute(
@@ -184,6 +245,7 @@ async def handle_snapshot(snapshot) -> None:
                     "timestamp": iso(snapshot.collected_at),
                     "clients": serialize_clients(db),
                     "network_nodes": serialize_nodes(db),
+                    "favorite_activity": serialize_favorite_activity(db),
                 }
             )
 
@@ -209,7 +271,7 @@ async def lifespan(app: FastAPI):
         db_runtime.dispose()
 
 
-app = FastAPI(title=settings.app_name, version="2.3.0", lifespan=lifespan)
+app = FastAPI(title=settings.app_name, version="2.4.0", lifespan=lifespan)
 
 
 # ---------- Request models ----------
@@ -340,16 +402,19 @@ def auth_change_password(
 def bootstrap(_=Depends(require_admin)) -> dict[str, Any]:
     clients: list[dict[str, Any]] = []
     nodes: list[dict[str, Any]] = []
+    favorite_activity: list[dict[str, Any]] = []
     if db_runtime.state == "ready":
         with db_runtime.session() as db:
             clients = serialize_clients(db)
             nodes = serialize_nodes(db)
+            favorite_activity = serialize_favorite_activity(db)
     return {
         "status": "success",
         "collector": collector.runtime.as_dict() if collector else {"state": "stopped"},
         "database": database_status_payload(),
         "clients": clients,
         "network_nodes": nodes,
+        "favorite_activity": favorite_activity,
         "router_host": settings.router_host,
         "server_time": iso(utcnow()),
     }
